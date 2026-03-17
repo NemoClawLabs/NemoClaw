@@ -152,7 +152,7 @@ function waitForNimHealth(port = 8000, timeout = 300) {
 
   while ((Date.now() - start) / 1000 < timeout) {
     try {
-      const result = runCapture(`curl -sf http://localhost:${safePort}/v1/models`, {
+      const result = runCapture(`curl -sf --connect-timeout 5 http://localhost:${safePort}/v1/models`, {
         ignoreError: true,
       });
       if (result) {
@@ -178,15 +178,22 @@ function stopNimContainer(sandboxName) {
 function nimStatus(sandboxName) {
   const name = containerName(sandboxName);
   try {
+    // Guard against docker not being installed
+    runCapture("command -v docker", { ignoreError: false });
+
     const state = runCapture(
+<<<<<<< HEAD
       `docker inspect --format '{{.State.Status}}' ${shellQuote(name)} 2>/dev/null`,
+=======
+      `docker inspect --format '{{.State.Status}}' "${name}" 2>/dev/null`,
+>>>>>>> fc43952 (fix: quote shell interpolations and add timeouts in nim.js)
       { ignoreError: true }
     );
     if (!state) return { running: false, container: name };
 
     let healthy = false;
     if (state === "running") {
-      const health = runCapture(`curl -sf http://localhost:8000/v1/models 2>/dev/null`, {
+      const health = runCapture(`curl -sf --connect-timeout 5 http://localhost:8000/v1/models 2>/dev/null`, {
         ignoreError: true,
       });
       healthy = !!health;
