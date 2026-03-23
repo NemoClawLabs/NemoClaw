@@ -22,8 +22,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         iproute2=6.1.0-3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create sandbox user (matches OpenShell convention)
-RUN groupadd -r sandbox && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbox \
+# Install gosu for privilege separation (gateway vs sandbox user)
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create sandbox user (matches OpenShell convention) and gateway user.
+# The gateway runs as 'gateway' so the 'sandbox' user (agent) cannot
+# kill it or restart it with a tampered HOME/config.
+RUN groupadd -r gateway && useradd -r -g gateway -d /sandbox -s /usr/sbin/nologin gateway \
+    && groupadd -r sandbox && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbox \
     && mkdir -p /sandbox/.nemoclaw \
     && chown -R sandbox:sandbox /sandbox
 
@@ -149,12 +157,32 @@ RUN openclaw doctor --fix > /dev/null 2>&1 || true \
 # The Landlock policy (/sandbox/.openclaw in read_only) provides defense-in-depth
 # once OpenShell enables enforcement.
 # Ref: https://github.com/NVIDIA/NemoClaw/issues/514
+# Lock the entire .openclaw directory tree.
+# SECURITY: chmod 755 (not 1777) — the sandbox user can READ but not WRITE
+# to this directory. This prevents the agent from replacing symlinks
+# (e.g., pointing /sandbox/.openclaw/hooks to an attacker-controlled path).
+# The writable state lives in .openclaw-data, reached via the symlinks.
 USER root
 RUN chown root:root /sandbox/.openclaw \
     && find /sandbox/.openclaw -mindepth 1 -maxdepth 1 -exec chown -h root:root {} + \
-    && chmod 1777 /sandbox/.openclaw \
+    && chmod 755 /sandbox/.openclaw \
     && chmod 444 /sandbox/.openclaw/openclaw.json
-USER sandbox
 
-ENTRYPOINT ["/bin/bash"]
+# Pin config hash at build time so the entrypoint can verify integrity.
+# Prevents the agent from creating a copy with a tampered config and
+# restarting the gateway pointing at it.
+RUN sha256sum /sandbox/.openclaw/openclaw.json > /sandbox/.openclaw/.config-hash \
+    && chmod 444 /sandbox/.openclaw/.config-hash \
+    && chown root:root /sandbox/.openclaw/.config-hash
+
+# Allow the gateway user to read the openclaw config and data dirs
+RUN setfacl -m u:gateway:rx /sandbox/.openclaw 2>/dev/null \
+    || chmod o+rx /sandbox/.openclaw
+RUN setfacl -m u:gateway:r /sandbox/.openclaw/openclaw.json 2>/dev/null \
+    || true
+
+# Entrypoint runs as root to start the gateway as the gateway user,
+# then drops to sandbox for agent commands. See nemoclaw-start.sh.
+# hadolint ignore=DL3002
+ENTRYPOINT ["/usr/local/bin/nemoclaw-start"]
 CMD []
