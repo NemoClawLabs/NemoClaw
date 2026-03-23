@@ -72,13 +72,16 @@ import json
 import subprocess
 import time
 
-DEADLINE = time.time() + 600
+DEADLINE = time.time() + 180
 QUIET_POLLS = 0
 APPROVED = 0
 
 def run(*args):
     proc = subprocess.run(args, capture_output=True, text=True)
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+# Revoke all device tokens from previous sessions so they don't persist across restarts
+run('openclaw', 'devices', 'clear', '--yes')
 
 while time.time() < DEADLINE:
     rc, out, err = run('openclaw', 'devices', 'list', '--json')
@@ -95,18 +98,28 @@ while time.time() < DEADLINE:
     paired = data.get('paired') or []
     has_browser = any((d.get('clientId') == 'openclaw-control-ui') or (d.get('clientMode') == 'webchat') for d in paired if isinstance(d, dict))
 
-    if pending:
+    if pending and APPROVED == 0:
         QUIET_POLLS = 0
         for device in pending:
-            request_id = (device or {}).get('requestId')
+            if not isinstance(device, dict):
+                continue
+            request_id = device.get('requestId')
             if not request_id:
+                continue
+            # Only approve the chat UI — reject unknown clients.
+            client_id = device.get('clientId', '')
+            if client_id != 'openclaw-control-ui':
+                print(f'[auto-pair] skipping non-UI device request={request_id} clientId={client_id!r}')
+                run('openclaw', 'devices', 'reject', request_id, '--json')
                 continue
             arc, aout, aerr = run('openclaw', 'devices', 'approve', request_id, '--json')
             if arc == 0:
                 APPROVED += 1
-                print(f'[auto-pair] approved request={request_id}')
+                print(f'[auto-pair] approved request={request_id} clientId={client_id}')
             elif aout or aerr:
                 print(f'[auto-pair] approve failed request={request_id}: {(aerr or aout)[:400]}')
+        if APPROVED >= 1:
+            DEADLINE = time.time() + 5
         time.sleep(1)
         continue
 
@@ -123,6 +136,9 @@ while time.time() < DEADLINE:
     time.sleep(1)
 else:
     print(f'[auto-pair] watcher timed out approvals={APPROVED}')
+
+# Clean up: reject any remaining pending requests so no stale requests linger
+run('openclaw', 'devices', 'clear', '--pending', '--yes')
 PYAUTOPAIR
   echo "[gateway] auto-pair watcher launched (pid $!)"
 }
