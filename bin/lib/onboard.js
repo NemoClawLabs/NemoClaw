@@ -296,10 +296,11 @@ async function preflight() {
   // dashboard forward.
   sleep(2);
 
-  // Required ports — gateway (8080) and dashboard (18789)
+  // Required ports — only check gateway (8080) here. Port 18789 (dashboard)
+  // is managed inside createSandbox() so that re-running onboard with an
+  // existing sandbox does not fail the preflight check.
   const requiredPorts = [
     { port: 8080, label: "OpenShell gateway" },
-    { port: 18789, label: "NemoClaw dashboard" },
   ];
   for (const { port, label } of requiredPorts) {
     const portCheck = await checkPortAvailable(port);
