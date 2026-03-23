@@ -107,22 +107,20 @@ describe("local inference helpers", () => {
 
   it("returns jetson 4b model as default on jetson when available", () => {
     const list = `nemotron-3-nano:4b  abc  2.8 GB  now\nqwen3:32b  def  20 GB  now`;
-    assert.equal(
+    expect(
       getDefaultOllamaModel(() => list, FAKE_JETSON_GPU),
-      DEFAULT_OLLAMA_MODEL_JETSON,
-    );
+    ).toBe(DEFAULT_OLLAMA_MODEL_JETSON);
   });
 
   it("falls back to jetson 4b model when ollama list is empty on jetson", () => {
-    assert.deepEqual(getOllamaModelOptions(() => "", FAKE_JETSON_GPU), [DEFAULT_OLLAMA_MODEL_JETSON]);
-    assert.equal(getDefaultOllamaModel(() => "", FAKE_JETSON_GPU), DEFAULT_OLLAMA_MODEL_JETSON);
+    expect(getOllamaModelOptions(() => "", FAKE_JETSON_GPU)).toEqual([DEFAULT_OLLAMA_MODEL_JETSON]);
+    expect(getDefaultOllamaModel(() => "", FAKE_JETSON_GPU)).toBe(DEFAULT_OLLAMA_MODEL_JETSON);
   });
 
   it("falls back to first available model on jetson when 4b is absent", () => {
-    assert.equal(
+    expect(
       getDefaultOllamaModel(() => "qwen3:4b  abc  3 GB  now", FAKE_JETSON_GPU),
-      "qwen3:4b",
-    );
+    ).toBe("qwen3:4b");
   });
 
   it("builds a background warmup command for ollama models", () => {

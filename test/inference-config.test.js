@@ -13,6 +13,7 @@ import {
   getOpenClawPrimaryModel,
   getProviderSelectionConfig,
 } from "../bin/lib/inference-config";
+import { getLocalProviderBaseUrl } from "../bin/lib/local-inference";
 
 describe("inference selection config", () => {
   it("exposes the curated cloud model picker options", () => {
@@ -26,10 +27,10 @@ describe("inference selection config", () => {
     ]);
   });
 
-  it("maps ollama-local to the sandbox inference route and default model", () => {
+  it("maps ollama-local to host-gateway URL (bypasses inference.local DNS)", () => {
     expect(getProviderSelectionConfig("ollama-local")).toEqual({
       endpointType: "custom",
-      endpointUrl: INFERENCE_ROUTE_URL,
+      endpointUrl: getLocalProviderBaseUrl("ollama-local"),
       ncpPartner: null,
       model: DEFAULT_OLLAMA_MODEL,
       profile: DEFAULT_ROUTE_PROFILE,
