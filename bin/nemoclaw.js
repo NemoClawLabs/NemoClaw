@@ -36,6 +36,7 @@ const policies = require("./lib/policies");
 const GLOBAL_COMMANDS = new Set([
   "onboard", "list", "deploy", "setup", "setup-spark",
   "start", "stop", "status", "debug", "uninstall",
+  "update",
   "help", "--help", "-h", "--version", "-v",
 ]);
 
@@ -389,6 +390,13 @@ async function sandboxDestroy(sandboxName, args = []) {
   console.log(`  ${G}✓${R} Sandbox '${sandboxName}' destroyed`);
 }
 
+// ── Self-Update ─────────────────────────────────────────────────
+
+async function update(opts) {
+  const { runUpdate } = require("./lib/update");
+  await runUpdate(opts);
+}
+
 // ── Help ─────────────────────────────────────────────────────────
 
 function help() {
@@ -419,6 +427,11 @@ function help() {
     nemoclaw start                   Start auxiliary services ${D}(Telegram, tunnel)${R}
     nemoclaw stop                    Stop all services
     nemoclaw status                  Show sandbox list and service status
+
+  ${G}Update:${R}
+    nemoclaw update                    Check for updates
+    nemoclaw update --yes             Update to latest version
+    nemoclaw update --force          Bypass update availability checks
 
   Troubleshooting:
     nemoclaw debug [--quick]         Collect diagnostics for bug reports
@@ -462,6 +475,7 @@ const [cmd, ...args] = process.argv.slice(2);
       case "debug":       debug(args); break;
       case "uninstall":   uninstall(args); break;
       case "list":        listSandboxes(); break;
+      case "update":      await update({ force: args.includes("--force"), yes: args.includes("--yes") }); break;
       case "--version":
       case "-v": {
         const pkg = require(path.join(__dirname, "..", "package.json"));
