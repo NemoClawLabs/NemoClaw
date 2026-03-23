@@ -10,7 +10,6 @@ content:
   type: how_to
   difficulty: intermediate
   audience: ["developer", "engineer"]
-status: draft
 ---
 
 <!--
@@ -22,13 +21,122 @@ status: draft
 
 Bridge stdio-based MCP servers from the host into a NemoClaw sandbox so the OpenClaw agent can call external tools without exposing API keys inside the sandbox.
 
+## How It Works
+
+A stdio-to-HTTP proxy runs on the host, spawning the MCP server subprocess with the user's API keys from the host environment.
+The proxy port is forwarded into the sandbox via `openshell forward`, appearing as `localhost:<port>` inside the sandbox.
+mcporter inside the sandbox connects to the forwarded port as a standard HTTP MCP server.
+
+```text
+Host                                Sandbox
++------------------------+         +-----------------------+
+|  stdio MCP server      |         |  mcporter             |
+|    |                   | forward |    |                  |
+|  stdio-to-HTTP proxy   |---------| localhost:<port>      |
+|    :3101               |         |                       |
+|  API keys stay here    |         |  OpenClaw agent       |
++------------------------+         |    (no API keys)      |
+                                   +-----------------------+
+```
+
 ## Prerequisites
 
 - A running NemoClaw sandbox.
 - An MCP server command, for example `npx @modelcontextprotocol/server-github`.
 - The required API key exported as an environment variable on the host.
 
-## Install mcporter in the Sandbox
+## Add an MCP Server
+
+Export the API key on the host.
+The bridge reads the variable name from the host environment and passes it to the MCP server process.
+The key never enters the sandbox.
+
+```console
+$ export GITHUB_TOKEN=<your-token>
+$ nemoclaw <name> mcp add --name github \
+    --command "npx @modelcontextprotocol/server-github" \
+    --env GITHUB_TOKEN
+```
+
+This command:
+
+1. Starts the stdio-to-HTTP proxy on the host with the named environment variables.
+2. Forwards the proxy port into the sandbox via `openshell forward`.
+3. Installs mcporter in the sandbox if not already present.
+4. Registers the server in the sandbox mcporter configuration.
+
+## List Bridges
+
+List all MCP bridges for a sandbox with their running status.
+
+```console
+$ nemoclaw <name> mcp list
+```
+
+```text
+MCP Bridges for sandbox "my-assistant":
+
+  * github      :3101  npx @modelcontextprotocol/server-github      env: GITHUB_TOKEN
+  * slack       :3102  npx @anthropic/mcp-server-slack               env: SLACK_TOKEN
+```
+
+A green dot indicates a running proxy.
+A red dot indicates the proxy has stopped and needs to be restarted.
+
+## Remove a Bridge
+
+Stop the proxy, stop the port forward, and remove the server from the sandbox mcporter configuration.
+
+```console
+$ nemoclaw <name> mcp remove github
+```
+
+## Restart After Reboot
+
+Proxy processes do not survive a host reboot.
+Restart all proxy processes and port forwards from the saved configuration.
+The sandbox-side mcporter configuration persists and does not need to be rewritten.
+
+```console
+$ nemoclaw <name> mcp restart
+```
+
+To restart a single bridge, pass the server name.
+
+```console
+$ nemoclaw <name> mcp restart github
+```
+
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `nemoclaw <name> mcp add --name <id> --command <cmd> [--env VAR ...] [--port PORT]` | Bridge a host MCP server into the sandbox |
+| `nemoclaw <name> mcp list` | List bridges with running status |
+| `nemoclaw <name> mcp remove <id>` | Stop and remove a bridge |
+| `nemoclaw <name> mcp restart [<id>]` | Restart all or one bridge after reboot |
+
+### Flags
+
+`--name <id>`
+: Required. Alphanumeric identifier for the MCP server.
+
+`--command <cmd>`
+: Required. The command to spawn the MCP server (e.g., `"npx @modelcontextprotocol/server-github"`).
+
+`--env VAR`
+: Repeatable. Name of an environment variable to pass from the host to the MCP server process.
+  The bridge reads the value from the host environment. The value never enters the sandbox.
+
+`--port PORT`
+: Optional. Host port for the proxy (default: auto-assigned from range 3100-3199).
+
+## Manual Setup
+
+The CLI commands above automate these steps.
+Use the manual process if you need to customize the proxy or debug the connection.
+
+### Install mcporter
 
 OpenClaw uses [mcporter](https://github.com/steipete/mcporter) to connect to MCP servers.
 The sandbox image does not include mcporter, so install it to the writable layer.
@@ -44,165 +152,31 @@ sandbox@<name>:~$ mcporter --version
 This persists across sandbox restarts.
 It is lost only if the sandbox is destroyed and recreated.
 
-## Add an MCP Server
-
-### Set the Environment Variable
-
-Export the API key on the host.
-The bridge reads the variable from the host environment and passes it to the MCP server process.
-The key never enters the sandbox.
-
-```console
-$ export GITHUB_TOKEN=<your-token>
-```
-
-### Start the Proxy and Forward the Port
-
-Start the stdio-to-HTTP proxy on the host.
-The proxy spawns the MCP server as a subprocess and exposes it over HTTP on a local port.
+### Start the Proxy
 
 ```console
 $ node scripts/mcp-proxy.js \
-    --command "npx @modelcontextprotocol/server-github" \
+    --exe npx \
+    --arg @modelcontextprotocol/server-github \
     --env GITHUB_TOKEN \
     --port 3101 &
 ```
 
-Forward the port into the sandbox.
+### Forward the Port
 
 ```console
 $ openshell forward start 3101 <name> &
 ```
 
-### Register the Server in the Sandbox
-
-Connect to the sandbox and add the server to the mcporter configuration.
+### Register in the Sandbox
 
 ```console
 $ nemoclaw <name> connect
 sandbox@<name>:~$ mcporter config add github --url http://localhost:3101 --scope home
-```
-
-### Verify
-
-List available tools to confirm the connection.
-
-```console
 sandbox@<name>:~$ mcporter list github
 ```
 
 If the tool list is returned, the bridge is working.
-The OpenClaw agent can now use the MCP tools through the `mcporter` skill.
-
-## Manage the Bridge
-
-### List Active Bridges
-
-Check which proxy processes are running on the host.
-
-```console
-$ ls /tmp/nemoclaw-services-<name>/mcp-*.pid
-```
-
-### Stop a Bridge
-
-Kill the proxy process and stop the port forward.
-
-```console
-$ kill $(cat /tmp/nemoclaw-services-<name>/mcp-github.pid)
-$ openshell forward stop 3101
-```
-
-### Restart After Reboot
-
-The proxy processes do not survive a host reboot.
-Restart them and the port forwards.
-The mcporter configuration inside the sandbox persists and does not need to be reconfigured.
-
-## CLI Commands
-
-The `nemoclaw <name> mcp` subcommands automate the manual steps above.
-
-### Add a stdio MCP server
-
-Bridge a host-side MCP server into the sandbox.
-
-```console
-$ export GITHUB_TOKEN=<your-token>
-$ nemoclaw <name> mcp add --name github \
-    --command "npx @modelcontextprotocol/server-github" \
-    --env GITHUB_TOKEN
-```
-
-This command:
-
-1. Starts the stdio-to-HTTP proxy on the host with the named environment variables.
-2. Forwards the port into the sandbox via `openshell forward`.
-3. Installs mcporter in the sandbox if not already present.
-4. Registers the server in the sandbox mcporter configuration.
-
-### List bridges
-
-List all MCP bridges for a sandbox with their running status.
-
-```console
-$ nemoclaw <name> mcp list
-```
-
-```text
-MCP Bridges for sandbox "my-assistant":
-
-  ● github      :3101  npx @modelcontextprotocol/server-github      env: GITHUB_TOKEN
-  ● slack       :3102  npx @anthropic/mcp-server-slack               env: SLACK_TOKEN
-```
-
-### Remove a bridge
-
-Stop the proxy, stop the port forward, and remove the server from the sandbox mcporter configuration.
-
-```console
-$ nemoclaw <name> mcp remove github
-```
-
-### Restart after reboot
-
-Restart all proxy processes and port forwards from the saved configuration.
-The sandbox-side mcporter configuration persists and does not need to be rewritten.
-
-```console
-$ nemoclaw <name> mcp restart
-```
-
-## Future Work
-
-:::{note}
-The following features are planned but not yet implemented.
-:::
-
-### Remote HTTP MCP servers
-
-Route a remote MCP server through a host-side reverse proxy so the sandbox connects to `localhost` and no egress policy is needed.
-
-```console
-$ nemoclaw <name> mcp add --name linear --url https://mcp.linear.app/mcp
-```
-
-### Import from Claude Code or Cursor
-
-Read MCP server definitions by name from editor configuration files.
-This extracts the command and environment variable names only, never values.
-
-```console
-$ nemoclaw <name> mcp import github --from claude
-```
-
-### Integration with nemoclaw start
-
-MCP bridges managed alongside the Telegram bridge and other auxiliary services.
-
-```console
-$ nemoclaw start
-```
 
 ## Security
 

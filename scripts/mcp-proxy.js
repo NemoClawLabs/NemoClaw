@@ -9,7 +9,7 @@
  * over HTTP so it can be forwarded into a NemoClaw sandbox.
  *
  * Usage:
- *   node scripts/mcp-proxy.js --command "npx @modelcontextprotocol/server-github" \
+ *   node scripts/mcp-proxy.js --exe npx --arg @modelcontextprotocol/server-github \
  *     --env GITHUB_TOKEN --port 3101
  *
  * The proxy binds to 127.0.0.1 only. API keys are inherited from the
