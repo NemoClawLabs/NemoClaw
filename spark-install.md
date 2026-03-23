@@ -19,7 +19,7 @@ curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | 
 git clone https://github.com/NVIDIA/NemoClaw.git
 cd NemoClaw
 
-# Spark-specific setup
+# Spark-specific setup (For details see [What's Different on Spark](#whats-different-on-spark))
 sudo ./scripts/setup-spark.sh
 
 # Install NemoClaw using the NemoClaw/install.sh:
@@ -27,6 +27,115 @@ sudo ./scripts/setup-spark.sh
 
 # Alternatively, you can use the hosted install script:
 curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
+```
+
+## Verifying Your Install
+
+```bash
+# Check sandbox is running
+nemoclaw my-assistant connect
+
+# Inside the sandbox, talk to the agent:
+openclaw agent --agent main --local -m "hello" --session-id test
+```
+
+## Uninstall (perform this before re-installing)
+
+```bash
+# Uninstall NemoClaw (Remove OpenShell sandboxes, gateway, NemoClaw providers, related Docker containers, images, volumes and configs)
+nemoclaw uninstall
+```
+
+## Setup Local Inference (Ollama)
+
+Use this to run inference locally on the DGX Spark's GPU instead of routing to cloud.
+
+### Step 1: Verify NVIDIA Container Runtime
+
+```bash
+docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi
+```
+
+If this fails, configure the NVIDIA runtime and restart Docker:
+
+```bash
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+### Step 2: Install Ollama
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Verify it is running:
+
+```bash
+curl http://localhost:11434
+```
+
+### Step 3: Pull and Pre-load a Model
+
+Download Nemotron 3 Super 120B (~87 GB; may take several minutes):
+
+```bash
+ollama pull nemotron-3-super:120b
+```
+
+Run it briefly to pre-load weights into unified memory, then exit:
+
+```bash
+ollama run nemotron-3-super:120b
+# type /bye to exit
+```
+
+### Step 4: Configure Ollama to Listen on All Interfaces
+
+By default Ollama binds to `127.0.0.1`, which is not reachable from inside the sandbox container. Configure it to listen on all interfaces:
+
+```bash
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0"\n' | sudo tee /etc/systemd/system/ollama.service.d/override.conf
+
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+Verify Ollama is listening on all interfaces:
+
+```bash
+ss -tlnp | grep 11434
+```
+
+### Step 5: Install OpenShell and NemoClaw
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
+curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
+```
+
+When prompted for **Inference options**, select **Local Ollama**, then select the model you pulled.
+
+### Step 6: Connect and Test
+
+```bash
+# Connect to the sandbox
+nemoclaw my-assistant connect
+```
+
+Inside the sandbox, first verify `inference.local` is reachable directly (must use HTTPS — the proxy intercepts `CONNECT inference.local:443`):
+
+```bash
+curl -sf https://inference.local/v1/models
+# Expected: JSON response listing the configured model
+# Exits non-zero on HTTP errors (403, 503, etc.) — failure here indicates a proxy routing regression
+```
+
+Then talk to the agent:
+
+```bash
+openclaw agent --agent main --local -m "Which model and GPU are in use?" --session-id test
 ```
 
 ## What's Different on Spark
@@ -84,12 +193,6 @@ sudo usermod -aG docker $USER
 newgrp docker  # or log out and back in
 ```
 
-### Then run the onboard wizard
-
-```bash
-nemoclaw onboard
-```
-
 ## Known Issues
 
 | Issue | Status | Workaround |
@@ -99,22 +202,6 @@ nemoclaw onboard
 | CoreDNS CrashLoop after setup | Fixed in `fix-coredns.sh` | Uses container gateway IP, not 127.0.0.11 |
 | Image pull failure (k3s can't find built image) | OpenShell bug | `openshell gateway destroy && openshell gateway start`, re-run setup |
 | GPU passthrough | Untested on Spark | Should work with `--gpu` flag if NVIDIA Container Toolkit is configured |
-
-## Verifying Your Install
-
-```bash
-# Check sandbox is running
-openshell sandbox list
-# Should show: nemoclaw  Ready
-
-# Test the agent
-openshell sandbox connect nemoclaw
-# Inside sandbox:
-nemoclaw-start openclaw agent --agent main --local -m 'hello' --session-id test
-
-# Monitor network egress (separate terminal)
-openshell term
-```
 
 ## Architecture Notes
 
