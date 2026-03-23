@@ -183,11 +183,11 @@ if [ "$NEEDS_RESTART" = true ]; then
   else
     service docker restart 2>/dev/null || dockerd &
   fi
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for i in $(seq 1 15); do
     if docker info > /dev/null 2>&1; then
       break
     fi
-    [ "$i" -eq 10 ] && fail "Docker didn't come back after restart. Check 'systemctl status docker'."
+    [ "$i" -eq 15 ] && fail "Docker didn't come back after restart. Check 'systemctl status docker'."
     sleep 2
   done
   info "Docker restarted with NVIDIA runtime"

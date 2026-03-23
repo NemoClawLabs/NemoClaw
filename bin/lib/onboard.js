@@ -72,14 +72,20 @@ function pythonLiteralJson(value) {
 }
 
 function buildSandboxConfigSyncScript(selectionConfig) {
+  // Derive provider type from the explicit provider field rather than comparing
+  // model names — Jetson uses a different default Ollama model which would
+  // otherwise be misclassified as nvidia-nim.
+  const localKind = String(
+    selectionConfig.provider || selectionConfig.endpointType || ""
+  ).toLowerCase();
   const providerType =
     selectionConfig.profile === "inference-local"
-      ? selectionConfig.model === DEFAULT_OLLAMA_MODEL
+      ? localKind.includes("ollama")
         ? "ollama-local"
-        : "nvidia-nim"
-      : selectionConfig.endpointType === "vllm"
-        ? "vllm-local"
-        : "nvidia-nim";
+        : localKind.includes("vllm")
+          ? "vllm-local"
+          : "nvidia-nim"
+      : "nvidia-nim";
   const primaryModel = getOpenClawPrimaryModel(providerType, selectionConfig.model);
   const providerKey = "inference";
   const providerConfig = {
@@ -285,8 +291,9 @@ async function preflight() {
   // a previous onboard run may have left the gateway running, which
   // would block port 8080 and cause a confusing "port in use" error.
   run("openshell gateway destroy -g nemoclaw 2>/dev/null || true", { ignoreError: true });
-  // Kill only nemoclaw-owned openclaw-gateway processes holding port 18789.
-  run("kill $(lsof -ti :18789 -c openclaw) 2>/dev/null || true", { ignoreError: true });
+  // NOTE: Port 18789 (dashboard forward) cleanup is deferred to createSandbox()
+  // so that a no-op rerun (keeping existing sandbox) does not kill a healthy
+  // dashboard forward.
   sleep(2);
 
   // Required ports — gateway (8080) and dashboard (18789)
@@ -385,29 +392,32 @@ function patchGatewayImageForJetson() {
 
   const os = require("os");
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-jetson-"));
-  const dockerfile = path.join(tmpDir, "Dockerfile");
-  fs.writeFileSync(
-    dockerfile,
-    [
-      `FROM ${image}`,
-      `RUN if command -v update-alternatives >/dev/null 2>&1 && \\`,
-      `      update-alternatives --set iptables /usr/sbin/iptables-legacy 2>/dev/null && \\`,
-      `      update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null; then \\`,
-      `      :; \\`,
-      `    elif [ -f /usr/sbin/iptables-legacy ] && [ -f /usr/sbin/ip6tables-legacy ]; then \\`,
-      `      ln -sf /usr/sbin/iptables-legacy /usr/sbin/iptables; \\`,
-      `      ln -sf /usr/sbin/ip6tables-legacy /usr/sbin/ip6tables; \\`,
-      `    else \\`,
-      `      echo "iptables-legacy not available in base image" >&2; exit 1; \\`,
-      `    fi`,
-      `LABEL io.nemoclaw.jetson-patched="true"`,
-      "",
-    ].join("\n")
-  );
+  try {
+    const dockerfile = path.join(tmpDir, "Dockerfile");
+    fs.writeFileSync(
+      dockerfile,
+      [
+        `FROM ${image}`,
+        `RUN if command -v update-alternatives >/dev/null 2>&1 && \\`,
+        `      update-alternatives --set iptables /usr/sbin/iptables-legacy 2>/dev/null && \\`,
+        `      update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null; then \\`,
+        `      :; \\`,
+        `    elif [ -f /usr/sbin/iptables-legacy ] && [ -f /usr/sbin/ip6tables-legacy ]; then \\`,
+        `      ln -sf /usr/sbin/iptables-legacy /usr/sbin/iptables; \\`,
+        `      ln -sf /usr/sbin/ip6tables-legacy /usr/sbin/ip6tables; \\`,
+        `    else \\`,
+        `      echo "iptables-legacy not available in base image" >&2; exit 1; \\`,
+        `    fi`,
+        `LABEL io.nemoclaw.jetson-patched="true"`,
+        "",
+      ].join("\n")
+    );
 
-  run(`docker build --quiet -t "${image}" "${tmpDir}"`, { ignoreError: false });
-  run(`rm -rf "${tmpDir}"`, { ignoreError: true });
-  console.log("  ✓ Gateway image patched for Jetson (iptables-legacy)");
+    run(`docker build --quiet -t "${image}" "${tmpDir}"`, { ignoreError: false });
+    console.log("  ✓ Gateway image patched for Jetson (iptables-legacy)");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 }
 
 // ── Step 2: Gateway ──────────────────────────────────────────────
@@ -500,6 +510,10 @@ async function createSandbox(gpu) {
     run(`openshell sandbox delete "${sandboxName}" 2>/dev/null || true`, { ignoreError: true });
     registry.removeSandbox(sandboxName);
   }
+
+  // Kill stale dashboard-forward processes only when we are actually
+  // creating or recreating — avoids breaking a healthy forward on no-op reruns.
+  run("kill $(lsof -ti :18789 -c openclaw) 2>/dev/null || true", { ignoreError: true });
 
   // Stage build context
   const { mkdtempSync } = require("fs");
@@ -814,19 +828,8 @@ async function setupOpenclaw(sandboxName, model, provider) {
       onboardedAt: new Date().toISOString(),
     };
     const script = buildSandboxConfigSyncScript(sandboxConfig);
-    // Also write ~/.nemoclaw/config.json inside the sandbox so the NemoClaw
-    // plugin displays the correct endpoint/model in its banner instead of
-    // falling back to the cloud defaults.
-    const nemoClawConfigScript = `
-mkdir -p ~/.nemoclaw
-cat > ~/.nemoclaw/config.json <<'EOF_NEMOCLAW_CFG'
-${JSON.stringify(sandboxConfig, null, 2)}
-EOF_NEMOCLAW_CFG
-`;
     run(`cat <<'EOF_NEMOCLAW_SYNC' | openshell sandbox connect "${sandboxName}"
 ${script}
-${nemoClawConfigScript}
-exit
 EOF_NEMOCLAW_SYNC`, { stdio: ["ignore", "ignore", "inherit"] });
   }
 
