@@ -46,10 +46,14 @@ def _create_openclaw_dir(home: Path) -> Path:
 
 
 class TestCreateSnapshot:
+    """Tests for create_snapshot() directory copying and manifest generation."""
+
     def test_no_openclaw_dir_returns_none(self, mock_home):
+        """Verify create_snapshot() returns None when ~/.openclaw does not exist."""
         assert create_snapshot() is None
 
     def test_creates_snapshot_with_manifest(self, mock_home):
+        """Verify create_snapshot() copies files and writes a snapshot.json manifest."""
         _create_openclaw_dir(mock_home)
         snap_dir = create_snapshot()
 
@@ -62,6 +66,7 @@ class TestCreateSnapshot:
         assert "config.yaml" in manifest["contents"]
 
     def test_snapshot_preserves_files(self, mock_home):
+        """Verify create_snapshot() preserves file contents in the snapshot copy."""
         _create_openclaw_dir(mock_home)
         snap_dir = create_snapshot()
 
@@ -71,6 +76,7 @@ class TestCreateSnapshot:
         )
 
     def test_snapshot_stored_under_nemoclaw(self, mock_home):
+        """Verify create_snapshot() stores snapshots under ~/.nemoclaw/snapshots/."""
         _create_openclaw_dir(mock_home)
         snap_dir = create_snapshot()
         assert ".nemoclaw" in str(snap_dir)
@@ -78,6 +84,7 @@ class TestCreateSnapshot:
 
     @patch("migrations.snapshot.datetime")
     def test_multiple_snapshots_have_different_dirs(self, mock_dt, mock_home):
+        """Verify two snapshots with different timestamps produce distinct directories."""
         _create_openclaw_dir(mock_home)
 
         # Use distinct timestamps so each snapshot gets its own directory
@@ -99,11 +106,15 @@ class TestCreateSnapshot:
 
 
 class TestRestoreIntoSandbox:
+    """Tests for restore_into_sandbox() openshell cp invocation."""
+
     def test_missing_source_returns_false(self, tmp_path):
+        """Verify restore_into_sandbox() returns False when the source dir is missing."""
         assert restore_into_sandbox(tmp_path, "openclaw") is False
 
     @patch("migrations.snapshot.subprocess.run")
     def test_successful_restore(self, mock_run, tmp_path):
+        """Verify restore_into_sandbox() returns True and calls openshell cp on success."""
         source = tmp_path / "openclaw"
         source.mkdir()
         (source / "config.yaml").write_text("model: nemotron")
@@ -117,6 +128,7 @@ class TestRestoreIntoSandbox:
 
     @patch("migrations.snapshot.subprocess.run")
     def test_failed_restore_returns_false(self, mock_run, tmp_path):
+        """Verify restore_into_sandbox() returns False when openshell cp fails."""
         source = tmp_path / "openclaw"
         source.mkdir()
         mock_run.return_value = type("Result", (), {"returncode": 1})()
@@ -134,10 +146,14 @@ class TestRestoreIntoSandbox:
 
 
 class TestCutoverHost:
+    """Tests for cutover_host() config archival during migration."""
+
     def test_no_openclaw_returns_true(self, mock_home):
+        """Verify cutover_host() returns True when no ~/.openclaw exists."""
         assert cutover_host(mock_home) is True
 
     def test_archives_existing_config(self, mock_home):
+        """Verify cutover_host() moves ~/.openclaw to a .pre-nemoclaw archive."""
         oc_dir = _create_openclaw_dir(mock_home)
         assert oc_dir.exists()
 
@@ -157,10 +173,14 @@ class TestCutoverHost:
 
 
 class TestRollbackFromSnapshot:
+    """Tests for rollback_from_snapshot() restore and archival logic."""
+
     def test_missing_snapshot_returns_false(self, tmp_path, mock_home):
+        """Verify rollback_from_snapshot() returns False for a nonexistent snapshot."""
         assert rollback_from_snapshot(tmp_path) is False
 
     def test_restores_from_snapshot(self, mock_home):
+        """Verify rollback_from_snapshot() restores ~/.openclaw from a snapshot."""
         oc_dir = _create_openclaw_dir(mock_home)
         snap_dir = create_snapshot()
         assert snap_dir is not None
@@ -175,6 +195,7 @@ class TestRollbackFromSnapshot:
         assert (oc_dir / "config.yaml").read_text() == "model: nemotron"
 
     def test_archives_current_before_restoring(self, mock_home):
+        """Verify rollback_from_snapshot() archives current config before restoring."""
         oc_dir = _create_openclaw_dir(mock_home)
         snap_dir = create_snapshot()
         assert snap_dir is not None
@@ -200,10 +221,14 @@ class TestRollbackFromSnapshot:
 
 
 class TestListSnapshots:
+    """Tests for list_snapshots() directory scanning and manifest parsing."""
+
     def test_no_snapshots_dir(self, mock_home):
+        """Verify list_snapshots() returns an empty list when no snapshots directory exists."""
         assert list_snapshots() == []
 
     def test_lists_snapshots_reverse_chronological(self, mock_home):
+        """Verify list_snapshots() returns snapshots ordered newest-first."""
         snaps_root = mock_home / ".nemoclaw" / "snapshots"
         older = snaps_root / "20260101T000000Z"
         newer = snaps_root / "20260101T000001Z"
@@ -225,6 +250,7 @@ class TestListSnapshots:
             assert "file_count" in s
 
     def test_ignores_dirs_without_manifest(self, mock_home):
+        """Verify list_snapshots() skips directories that lack a snapshot.json manifest."""
         snap_dir = mock_home / ".nemoclaw" / "snapshots"
         snap_dir.mkdir(parents=True)
         (snap_dir / "orphan-dir").mkdir()
