@@ -11,6 +11,7 @@ import {
   getFutureShellPathHint,
   getInstalledOpenshellVersion,
   getStableGatewayImageRef,
+  parseTokenFromOutput,
   writeSandboxConfigSyncFile,
 } from "../bin/lib/onboard";
 
@@ -69,5 +70,33 @@ describe("onboard helpers", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  describe("parseTokenFromOutput", () => {
+    it("extracts token from a TOKEN: prefixed line", () => {
+      const out = "shell noise\nTOKEN:test-token-unit-fixture\nexit\n";
+      expect(parseTokenFromOutput(out)).toBe("test-token-unit-fixture");
+    });
+
+    it("returns the first TOKEN: match when multiple lines match", () => {
+      const out = "TOKEN:first\nTOKEN:second\n";
+      expect(parseTokenFromOutput(out)).toBe("first");
+    });
+
+    it("trims whitespace around the TOKEN: line", () => {
+      const out = "  TOKEN:abc123  \n";
+      expect(parseTokenFromOutput(out)).toBe("abc123");
+    });
+
+    it("returns null when no TOKEN: prefix is present", () => {
+      expect(parseTokenFromOutput("no token here")).toBe(null);
+      expect(parseTokenFromOutput("some output\nexit\n")).toBe(null);
+    });
+
+    it("returns null for empty or non-string input", () => {
+      expect(parseTokenFromOutput("")).toBe(null);
+      expect(parseTokenFromOutput(null)).toBe(null);
+      expect(parseTokenFromOutput(undefined)).toBe(null);
+    });
   });
 });
