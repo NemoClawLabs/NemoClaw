@@ -1,54 +1,69 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
-//
-// NIM container management — pull, start, stop, health-check NIM images.
+#!/usr/bin/env node
 
-const { run, runCapture, shellQuote } = require("./runner");
-const nimImages = require("./nim-images.json");
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
-function containerName(sandboxName) {
-  return `nemoclaw-nim-${sandboxName}`;
+function shellQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
-function getImageForModel(modelName) {
-  const entry = nimImages.models.find((m) => m.name === modelName);
-  return entry ? entry.image : null;
+function run(cmd, opts = {}) {
+  const res = spawnSync(cmd, {
+    shell: true,
+    stdio: "inherit",
+    env: process.env,
+    ...opts,
+  });
+  if (res.error) throw res.error;
+  if (res.status !== 0 && !opts.ignoreError) {
+    process.exit(res.status ?? 1);
+  }
+  return res.status ?? 0;
 }
 
-function listModels() {
-  return nimImages.models.map((m) => ({
-    name: m.name,
-    image: m.image,
-    minGpuMemoryMB: m.minGpuMemoryMB,
-  }));
+function runCapture(cmd, opts = {}) {
+  const res = spawnSync(cmd, {
+    shell: true,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: process.env,
+    ...opts,
+  });
+  if (res.error) throw res.error;
+  if (res.status !== 0 && !opts.ignoreError) {
+    throw new Error((res.stderr || "").trim() || `Command failed: ${cmd}`);
+  }
+  return (res.stdout || "").trim();
+}
+
+function isJetsonPlatform() {
+  try {
+    const nvTegra = runCapture("test -f /etc/nv_tegra_release && echo yes", {
+      ignoreError: true,
+    });
+    if (nvTegra && nvTegra.trim() === "yes") return true;
+  } catch {}
+
+  try {
+    const compat = runCapture("tr '\\0' '\\n' < /proc/device-tree/compatible", {
+      ignoreError: true,
+    });
+    if (compat && /nvidia,tegra|nvidia,thor/i.test(compat)) return true;
+  } catch {}
+
+  try {
+    const model = runCapture("tr '\\0' '\\n' < /proc/device-tree/model", {
+      ignoreError: true,
+    });
+    if (model && /jetson|thor|nvidia/i.test(model)) return true;
+  } catch {}
+
+  return false;
 }
 
 function detectGpu() {
-  function isJetsonPlatform() {
-    try {
-      const nvTegra = runCapture("test -f /etc/nv_tegra_release && echo yes", {
-        ignoreError: true,
-      });
-      if (nvTegra && nvTegra.trim() === "yes") return true;
-    } catch {}
-
-    try {
-      const compat = runCapture("tr '\\0' '\\n' < /proc/device-tree/compatible", {
-        ignoreError: true,
-      });
-      if (compat && /nvidia,tegra|nvidia,thor/i.test(compat)) return true;
-    } catch {}
-
-    try {
-      const model = runCapture("tr '\\0' '\\n' < /proc/device-tree/model", {
-        ignoreError: true,
-      });
-      if (model && /jetson|thor|nvidia/i.test(model)) return true;
-    } catch {}
-
-    return false;
-  }
-
   function getSystemMemoryMB() {
     try {
       const memLine = runCapture("awk '/MemTotal:/ {print $2}' /proc/meminfo", {
@@ -194,15 +209,16 @@ function detectGpu() {
   return null;
 }
 
-function pullNimImage(model) {
-  const image = getImageForModel(model);
-  if (!image) {
-    console.error(`  Unknown model: ${model}`);
-    process.exit(1);
-  }
-  console.log(`  Pulling NIM image: ${image}`);
-  run(`docker pull ${shellQuote(image)}`);
-  return image;
+function containerName(sandboxName) {
+  return `nim-${sandboxName}`;
+}
+
+function getImageForModel(model) {
+  const map = {
+    llama: "nvcr.io/nim/meta/llama-3.1-8b-instruct:latest",
+    mistral: "nvcr.io/nim/mistralai/mistral-7b-instruct-v0.3:latest",
+  };
+  return map[model] || null;
 }
 
 function startNimContainer(sandboxName, model, port = 8000) {
@@ -228,67 +244,36 @@ function startNimContainer(sandboxName, model, port = 8000) {
   return name;
 }
 
-function waitForNimHealth(port = 8000, timeout = 300) {
-  const start = Date.now();
-  const interval = 5000;
-  const safePort = Number(port);
-  console.log(`  Waiting for NIM health on port ${safePort} (timeout: ${timeout}s)...`);
-
-  while ((Date.now() - start) / 1000 < timeout) {
-    try {
-      const result = runCapture(`curl -sf http://localhost:${safePort}/v1/models`, {
-        ignoreError: true,
-      });
-      if (result) {
-        console.log("  NIM is healthy.");
-        return true;
-      }
-    } catch {}
-    // Synchronous sleep via spawnSync
-    require("child_process").spawnSync("sleep", ["5"]);
-  }
-  console.error(`  NIM did not become healthy within ${timeout}s.`);
-  return false;
+function usage() {
+  console.log(`Usage:
+  nim.js detect-gpu
+  nim.js start <sandboxName> <model> [port]`);
 }
 
-function stopNimContainer(sandboxName) {
-  const name = containerName(sandboxName);
-  const qn = shellQuote(name);
-  console.log(`  Stopping NIM container: ${name}`);
-  run(`docker stop ${qn} 2>/dev/null || true`, { ignoreError: true });
-  run(`docker rm ${qn} 2>/dev/null || true`, { ignoreError: true });
-}
+function main() {
+  const [, , cmd, ...args] = process.argv;
 
-function nimStatus(sandboxName) {
-  const name = containerName(sandboxName);
-  try {
-    const state = runCapture(
-      `docker inspect --format '{{.State.Status}}' ${shellQuote(name)} 2>/dev/null`,
-      { ignoreError: true }
-    );
-    if (!state) return { running: false, container: name };
-
-    let healthy = false;
-    if (state === "running") {
-      const health = runCapture(`curl -sf http://localhost:8000/v1/models 2>/dev/null`, {
-        ignoreError: true,
-      });
-      healthy = !!health;
+  switch (cmd) {
+    case "detect-gpu": {
+      const gpu = detectGpu();
+      console.log(JSON.stringify(gpu, null, 2));
+      break;
     }
-    return { running: state === "running", healthy, container: name, state };
-  } catch {
-    return { running: false, container: name };
+
+    case "start": {
+      const [sandboxName, model, port] = args;
+      if (!sandboxName || !model) {
+        usage();
+        process.exit(1);
+      }
+      startNimContainer(sandboxName, model, port ? Number(port) : 8000);
+      break;
+    }
+
+    default:
+      usage();
+      process.exit(1);
   }
 }
 
-module.exports = {
-  containerName,
-  getImageForModel,
-  listModels,
-  detectGpu,
-  pullNimImage,
-  startNimContainer,
-  waitForNimHealth,
-  stopNimContainer,
-  nimStatus,
-};
+main();
