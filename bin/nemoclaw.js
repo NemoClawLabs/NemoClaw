@@ -89,15 +89,15 @@ async function setup() {
   console.log("  ⚠  `nemoclaw setup` is deprecated. Use `nemoclaw onboard` instead.");
   console.log("     Running legacy setup.sh for backwards compatibility...");
   console.log("");
-  await ensureApiKey();
+  const key = await ensureApiKey();
   const { defaultSandbox } = registry.listSandboxes();
   const safeName = defaultSandbox && /^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(defaultSandbox) ? defaultSandbox : "";
-  run(`bash "${SCRIPTS}/setup.sh" ${shellQuote(safeName)}`);
+  run(`bash "${SCRIPTS}/setup.sh" ${shellQuote(safeName)}`, { env: { ...process.env, NVIDIA_API_KEY: key } });
 }
 
 async function setupSpark() {
-  await ensureApiKey();
-  run(`sudo -E NVIDIA_API_KEY=${shellQuote(process.env.NVIDIA_API_KEY)} bash "${SCRIPTS}/setup-spark.sh"`);
+  const key = await ensureApiKey();
+  run(`sudo -E bash "${SCRIPTS}/setup-spark.sh"`, { env: { ...process.env, NVIDIA_API_KEY: key } });
 }
 
 async function deploy(instanceName) {
@@ -110,9 +110,12 @@ async function deploy(instanceName) {
     console.error("    nemoclaw deploy nemoclaw-test");
     process.exit(1);
   }
-  await ensureApiKey();
+
+  const env = { ...process.env };
+  env.NVIDIA_API_KEY = await ensureApiKey();
+
   if (isRepoPrivate("NVIDIA/OpenShell")) {
-    await ensureGithubToken();
+    env.GITHUB_TOKEN = await ensureGithubToken();
   }
   validateName(instanceName, "instance name");
   const name = instanceName;
@@ -141,12 +144,12 @@ async function deploy(instanceName) {
 
   if (!exists) {
     console.log(`  Creating Brev instance '${name}' (${gpu})...`);
-    run(`brev create ${qname} --gpu ${shellQuote(gpu)}`);
+    run(`brev create ${qname} --gpu ${shellQuote(gpu)}`, { env });
   } else {
     console.log(`  Brev instance '${name}' already exists.`);
   }
 
-  run(`brev refresh`, { ignoreError: true });
+  run(`brev refresh`, { ignoreError: true, env });
 
   process.stdout.write(`  Waiting for SSH `);
   for (let i = 0; i < 60; i++) {
@@ -169,8 +172,8 @@ async function deploy(instanceName) {
   run(`ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR ${qname} 'mkdir -p /home/ubuntu/nemoclaw'`);
   run(`rsync -az --delete --exclude node_modules --exclude .git --exclude src -e "ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR" "${ROOT}/scripts" "${ROOT}/Dockerfile" "${ROOT}/nemoclaw" "${ROOT}/nemoclaw-blueprint" "${ROOT}/bin" "${ROOT}/package.json" ${qname}:/home/ubuntu/nemoclaw/`);
 
-  const envLines = [`NVIDIA_API_KEY=${shellQuote(process.env.NVIDIA_API_KEY || "")}`];
-  const ghToken = process.env.GITHUB_TOKEN;
+  const envLines = [`NVIDIA_API_KEY=${shellQuote(env.NVIDIA_API_KEY || "")}`];
+  const ghToken = env.GITHUB_TOKEN;
   if (ghToken) envLines.push(`GITHUB_TOKEN=${shellQuote(ghToken)}`);
   const tgToken = getCredential("TELEGRAM_BOT_TOKEN");
   if (tgToken) envLines.push(`TELEGRAM_BOT_TOKEN=${shellQuote(tgToken)}`);
