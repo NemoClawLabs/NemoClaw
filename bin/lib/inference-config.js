@@ -2,6 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const INFERENCE_ROUTE_URL = "https://inference.local/v1";
+// On OpenShell 0.0.10, the inference.local virtual host is not registered in
+// CoreDNS, so DNS resolution fails inside the sandbox. For local providers
+// (Ollama, vLLM), route directly via the Docker host-gateway alias instead.
+// TODO: Remove these direct URLs once OpenShell fixes inference.local DNS
+// registration (tracked in OpenShell — affects all local providers).
+const { HOST_GATEWAY_URL, getLocalProviderBaseUrl } = require("./local-inference");
+const OLLAMA_DIRECT_URL = getLocalProviderBaseUrl("ollama-local");
+const VLLM_DIRECT_URL = getLocalProviderBaseUrl("vllm-local");
 const DEFAULT_CLOUD_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 const CLOUD_MODEL_OPTIONS = [
   { id: "nvidia/nemotron-3-super-120b-a12b", label: "Nemotron 3 Super 120B" },
@@ -32,7 +40,7 @@ function getProviderSelectionConfig(provider, model) {
     case "vllm-local":
       return {
         endpointType: "custom",
-        endpointUrl: INFERENCE_ROUTE_URL,
+        endpointUrl: VLLM_DIRECT_URL,
         ncpPartner: null,
         model: model || "vllm-local",
         profile: DEFAULT_ROUTE_PROFILE,
@@ -43,7 +51,9 @@ function getProviderSelectionConfig(provider, model) {
     case "ollama-local":
       return {
         endpointType: "custom",
-        endpointUrl: INFERENCE_ROUTE_URL,
+        // Use host-gateway URL directly instead of inference.local, which
+        // fails DNS resolution inside the sandbox on OpenShell 0.0.10.
+        endpointUrl: OLLAMA_DIRECT_URL,
         ncpPartner: null,
         model: model || DEFAULT_OLLAMA_MODEL,
         profile: DEFAULT_ROUTE_PROFILE,

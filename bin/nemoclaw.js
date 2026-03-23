@@ -34,7 +34,7 @@ const policies = require("./lib/policies");
 // ── Global commands ──────────────────────────────────────────────
 
 const GLOBAL_COMMANDS = new Set([
-  "onboard", "list", "deploy", "setup", "setup-spark",
+  "onboard", "list", "deploy", "setup", "setup-spark", "setup-jetson",
   "start", "stop", "status", "debug", "uninstall",
   "help", "--help", "-h", "--version", "-v",
 ]);
@@ -98,6 +98,10 @@ async function setup() {
 async function setupSpark() {
   await ensureApiKey();
   run(`sudo -E NVIDIA_API_KEY=${shellQuote(process.env.NVIDIA_API_KEY)} bash "${SCRIPTS}/setup-spark.sh"`);
+}
+
+async function setupJetson() {
+  run(`sudo -E bash "${SCRIPTS}/setup-jetson.sh"`);
 }
 
 async function deploy(instanceName) {
@@ -400,6 +404,7 @@ function help() {
   ${G}Getting Started:${R}
     ${B}nemoclaw onboard${R}                 Configure inference endpoint and credentials
     nemoclaw setup-spark             Set up on DGX Spark ${D}(fixes cgroup v2 + Docker)${R}
+    nemoclaw setup-jetson            Set up on Jetson ${D}(NVIDIA runtime + iptables fix)${R}
 
   ${G}Sandbox Management:${R}
     ${B}nemoclaw list${R}                    List all sandboxes
@@ -455,6 +460,7 @@ const [cmd, ...args] = process.argv.slice(2);
       case "onboard":     await onboard(args); break;
       case "setup":       await setup(); break;
       case "setup-spark": await setupSpark(); break;
+      case "setup-jetson": await setupJetson(); break;
       case "deploy":      await deploy(args[0]); break;
       case "start":       await start(); break;
       case "stop":        stop(); break;

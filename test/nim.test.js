@@ -4,6 +4,12 @@
 import { describe, it, expect } from "vitest";
 import nim from "../bin/lib/nim";
 
+// Detect GPU once for conditional test gating.
+const detectedGpu = nim.detectGpu();
+const isDiscreteNvidia = detectedGpu && detectedGpu.type === "nvidia" && !detectedGpu.jetson;
+const isJetson = detectedGpu && detectedGpu.type === "nvidia" && detectedGpu.jetson;
+const isApple = detectedGpu && detectedGpu.type === "apple";
+
 describe("nim", () => {
   describe("listModels", () => {
     it("returns 5 models", () => {
@@ -47,10 +53,20 @@ describe("nim", () => {
       }
     });
 
-    it("nvidia type is nimCapable", () => {
+    it("nvidia (discrete) type is nimCapable", () => {
       const gpu = nim.detectGpu();
-      if (gpu && gpu.type === "nvidia") {
+      if (gpu && gpu.type === "nvidia" && !gpu.jetson) {
         expect(gpu.nimCapable).toBe(true);
+      }
+    });
+
+    it("nvidia (jetson) type is not nimCapable", () => {
+      const gpu = nim.detectGpu();
+      if (gpu && gpu.type === "nvidia" && gpu.jetson) {
+        expect(gpu.nimCapable).toBe(false);
+        expect(gpu.name).toBeTruthy();
+        expect(gpu.jetson).toBe(true);
+        expect(gpu.totalMemoryMB).toBeGreaterThan(0);
       }
     });
 
