@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   CLOUD_MODEL_OPTIONS,
+  DEFAULT_LMSTUDIO_MODEL,
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_ROUTE_CREDENTIAL_ENV,
   DEFAULT_ROUTE_PROFILE,
@@ -56,5 +57,49 @@ describe("inference selection config", () => {
 
   it("builds a qualified OpenClaw primary model for ollama-local", () => {
     expect(getOpenClawPrimaryModel("ollama-local", "nemotron-3-nano:30b")).toBe(`${MANAGED_PROVIDER_ID}/nemotron-3-nano:30b`);
+  });
+
+  it("maps ollama-k3s to the sandbox inference route with sidecar label", () => {
+    expect(getProviderSelectionConfig("ollama-k3s")).toEqual({
+      endpointType: "custom",
+      endpointUrl: INFERENCE_ROUTE_URL,
+      ncpPartner: null,
+      model: DEFAULT_OLLAMA_MODEL,
+      profile: DEFAULT_ROUTE_PROFILE,
+      credentialEnv: DEFAULT_ROUTE_CREDENTIAL_ENV,
+      provider: "ollama-k3s",
+      providerLabel: "Ollama (container sidecar)",
+    });
+  });
+
+  it("builds a qualified OpenClaw primary model for ollama-k3s", () => {
+    expect(getOpenClawPrimaryModel("ollama-k3s", "nemotron-3-nano:30b")).toBe(
+      `${MANAGED_PROVIDER_ID}/nemotron-3-nano:30b`,
+    );
+  });
+
+  it("uses default Ollama model for ollama-k3s when no model specified", () => {
+    expect(getOpenClawPrimaryModel("ollama-k3s")).toBe(
+      `${MANAGED_PROVIDER_ID}/${DEFAULT_OLLAMA_MODEL}`,
+    );
+  });
+
+  it("maps lmstudio-k3s to the sandbox inference route with sidecar label", () => {
+    expect(getProviderSelectionConfig("lmstudio-k3s")).toEqual({
+      endpointType: "custom",
+      endpointUrl: INFERENCE_ROUTE_URL,
+      ncpPartner: null,
+      model: DEFAULT_LMSTUDIO_MODEL,
+      profile: DEFAULT_ROUTE_PROFILE,
+      credentialEnv: DEFAULT_ROUTE_CREDENTIAL_ENV,
+      provider: "lmstudio-k3s",
+      providerLabel: "LM Studio (container sidecar)",
+    });
+  });
+
+  it("uses default model for lmstudio-k3s when no model specified", () => {
+    expect(getOpenClawPrimaryModel("lmstudio-k3s")).toBe(
+      `${MANAGED_PROVIDER_ID}/${DEFAULT_OLLAMA_MODEL}`,
+    );
   });
 });
