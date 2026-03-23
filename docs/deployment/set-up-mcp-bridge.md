@@ -136,22 +136,6 @@ $ nemoclaw <name> mcp restart github
 The CLI commands above automate these steps.
 Use the manual process if you need to customize the proxy or debug the connection.
 
-### Install mcporter
-
-OpenClaw uses [mcporter](https://github.com/steipete/mcporter) to connect to MCP servers.
-The sandbox image does not include mcporter, so install it to the writable layer.
-
-```console
-$ nemoclaw <name> connect
-sandbox@<name>:~$ npm install --prefix /sandbox/.local mcporter
-sandbox@<name>:~$ echo 'export PATH="/sandbox/.local/node_modules/.bin:$PATH"' >> /sandbox/.bash_profile
-sandbox@<name>:~$ source /sandbox/.bash_profile
-sandbox@<name>:~$ mcporter --version
-```
-
-This persists across sandbox restarts.
-It is lost only if the sandbox is destroyed and recreated.
-
 ### Start the Proxy
 
 ```console
