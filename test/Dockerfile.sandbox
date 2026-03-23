@@ -18,7 +18,7 @@ RUN groupadd -r sandbox && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbo
     && chown -R sandbox:sandbox /sandbox
 
 # Install OpenClaw CLI
-RUN npm install -g openclaw@2026.3.11
+RUN npm install -g openclaw@2026.3.22
 
 # Install PyYAML for blueprint runner
 RUN pip3 install --break-system-packages pyyaml
@@ -65,7 +65,7 @@ RUN mkdir -p /sandbox/.openclaw/workspace /sandbox/.openclaw/extensions /sandbox
         '{' \
         '  "wizard": {' \
         '    "lastRunAt": "2026-03-14T00:00:00.000Z",' \
-        '    "lastRunVersion": "2026.3.11",' \
+        '    "lastRunVersion": "2026.3.22",' \
         '    "lastRunCommand": "doctor",' \
         '    "lastRunMode": "local"' \
         '  },' \
@@ -75,7 +75,7 @@ RUN mkdir -p /sandbox/.openclaw/workspace /sandbox/.openclaw/extensions /sandbox
         '    "restart": true' \
         '  },' \
         '  "meta": {' \
-        '    "lastTouchedVersion": "2026.3.11",' \
+        '    "lastTouchedVersion": "2026.3.22",' \
         '    "lastTouchedAt": "2026-03-14T00:00:00.000Z"' \
         '  }' \
         '}' > /sandbox/.openclaw/openclaw.json \
@@ -112,7 +112,7 @@ RUN mkdir -p /sandbox/openclaw-state/extensions /sandbox/openclaw-state/skills /
         '    }' \
         '  },' \
         '  "meta": {' \
-        '    "lastTouchedVersion": "2026.3.11",' \
+        '    "lastTouchedVersion": "2026.3.22",' \
         '    "lastTouchedAt": "2026-03-14T00:00:00.000Z"' \
         '  }' \
         '}' > /sandbox/config/openclaw.json \
