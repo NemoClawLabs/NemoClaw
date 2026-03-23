@@ -158,7 +158,9 @@ USER root
 RUN chown root:root /sandbox/.openclaw \
     && find /sandbox/.openclaw -mindepth 1 -maxdepth 1 -exec chown -h root:root {} + \
     && chmod 0555 /sandbox/.openclaw \
-    && chmod 444 /sandbox/.openclaw/openclaw.json
+    && chmod 444 /sandbox/.openclaw/openclaw.json \
+    && chown -R sandbox:sandbox /sandbox/.openclaw-data/workspace \
+                                /sandbox/.openclaw-data/agents
 USER sandbox
 
 ENTRYPOINT ["/bin/bash"]
