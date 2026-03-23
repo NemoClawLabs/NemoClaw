@@ -103,46 +103,50 @@ describe("CLI dispatch", () => {
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-cli-home-"));
     const fakeOpenShell = path.join(fakeBin, "openshell");
     const registryDir = path.join(fakeHome, ".nemoclaw");
-
-    fs.writeFileSync(
-      fakeOpenShell,
-      "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/openshell-args.txt\"\n",
-      { mode: 0o755 },
-    );
-    fs.mkdirSync(registryDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(registryDir, "sandboxes.json"),
-      JSON.stringify({
-        sandboxes: {
-          "my-assistant": {
-            name: "my-assistant",
-            model: "test-model",
-            provider: "nvidia-nim",
-            gpuEnabled: false,
-            policies: [],
+    try {
+      fs.writeFileSync(
+        fakeOpenShell,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/openshell-args.txt\"\n",
+        { mode: 0o755 },
+      );
+      fs.mkdirSync(registryDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(registryDir, "sandboxes.json"),
+        JSON.stringify({
+          sandboxes: {
+            "my-assistant": {
+              name: "my-assistant",
+              model: "test-model",
+              provider: "nvidia-nim",
+              gpuEnabled: false,
+              policies: [],
+            },
           },
-        },
-        defaultSandbox: "my-assistant",
-      }),
-    );
+          defaultSandbox: "my-assistant",
+        }),
+      );
 
-    const r = run("my-assistant logs --follow", {
-      HOME: fakeHome,
-      PATH: `${fakeBin}:${process.env.PATH}`,
-    });
+      const r = run("my-assistant logs --follow", {
+        HOME: fakeHome,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      });
 
-    assert.equal(r.code, 0);
-    const args = fs
-      .readFileSync(path.join(fakeHome, "openshell-args.txt"), "utf-8")
-      .trim()
-      .split("\n");
-    assert.deepEqual(args, ["logs", "my-assistant", "--tail"]);
+      expect(r.code).toBe(0);
+      const args = fs
+        .readFileSync(path.join(fakeHome, "openshell-args.txt"), "utf-8")
+        .trim()
+        .split("\n");
+      expect(args).toEqual(["logs", "my-assistant", "--tail"]);
+    } finally {
+      fs.rmSync(fakeBin, { recursive: true, force: true });
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
   });
 
   it("cleans up internally-created HOME directories after each run", () => {
     const r = run("help");
-    assert.equal(r.code, 0);
-    assert.ok(r.home, "expected run() to report the HOME directory it used");
-    assert.equal(fs.existsSync(r.home), false, "expected auto-created HOME directory to be removed");
+    expect(r.code).toBe(0);
+    expect(r.home).toBeTruthy();
+    expect(fs.existsSync(r.home)).toBe(false);
   });
 });
