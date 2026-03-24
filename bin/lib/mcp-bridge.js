@@ -135,10 +135,7 @@ function ensureMcporter(sandboxName) {
     `grep -qF '${profileLine}' /sandbox/.bash_profile 2>/dev/null || echo '${profileLine}' >> /sandbox/.bash_profile`,
   );
 
-  const verify = sshExec(
-    sandboxName,
-    "/sandbox/.local/node_modules/.bin/mcporter --version",
-  );
+  const verify = sshExec(sandboxName, "mcporter --version");
   if (verify && verify.trim()) {
     console.log(`  mcporter ${verify.trim()} installed.`);
     return true;
@@ -257,7 +254,7 @@ function add(sandboxName, opts) {
 
   const configOut = sshExec(
     sandboxName,
-    `/sandbox/.local/node_modules/.bin/mcporter config add ${name} --url http://localhost:${port} --scope home 2>&1`,
+    `mcporter config add ${name} --url http://localhost:${port} --scope home 2>&1`,
   );
   if (!configOut || /error/i.test(configOut)) {
     console.error("  mcporter config add failed. Rolling back...");
@@ -329,10 +326,7 @@ function remove(sandboxName, serverName) {
   });
 
   // Remove from sandbox mcporter config
-  sshExec(
-    sandboxName,
-    `/sandbox/.local/node_modules/.bin/mcporter config remove ${serverName} 2>&1 || true`,
-  );
+  sshExec(sandboxName, `mcporter config remove ${serverName} 2>&1 || true`);
 
   // Remove from registry
   delete sandbox.mcp[serverName];
