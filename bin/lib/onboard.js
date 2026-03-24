@@ -534,8 +534,6 @@ async function createSandbox(gpu) {
   }
 
   // Stage build context
-  const { mkdtempSync } = require("fs");
-  const os = require("os");
   const buildCtx = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-build-"));
   fs.copyFileSync(path.join(ROOT, "Dockerfile"), path.join(buildCtx, "Dockerfile"));
   run(`cp -r "${path.join(ROOT, "nemoclaw")}" "${buildCtx}/nemoclaw"`);
@@ -1050,6 +1048,55 @@ async function setupPolicies(sandboxName) {
 
 // ── Dashboard ────────────────────────────────────────────────────
 
+/**
+ * Extract gateway auth token from sandbox connect output.
+ * The output may contain shell noise; looks for a line matching TOKEN:<value>.
+ * Exported for unit tests.
+ */
+function parseTokenFromOutput(output) {
+  if (!output || typeof output !== "string") return null;
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("TOKEN:") && trimmed.length > 6) {
+      const token = trimmed.slice(6).trim();
+      if (token) return token;
+    }
+  }
+  return null;
+}
+
+/**
+ * Retrieve the gateway auth token from the sandbox's openclaw.json.
+ * Uses `openshell sandbox connect < script` (same pattern as setupOpenclaw)
+ * instead of SSH to avoid temp config files and StrictHostKeyChecking.
+ */
+function getDashboardToken(sandboxName) {
+  const script = [
+    "python3 -c \"",
+    "import json, os",
+    "try:",
+    "    cfg = json.load(open(os.path.expanduser('~/.openclaw/openclaw.json')))",
+    "    t = cfg.get('gateway', {}).get('auth', {}).get('token', '')",
+    "    print('TOKEN:' + t) if t else None",
+    "except Exception:",
+    "    pass",
+    "\"",
+    "exit",
+  ].join("\n");
+  const scriptFile = writeSandboxConfigSyncFile(script);
+  try {
+    const out = runCapture(
+      `openshell sandbox connect ${shellQuote(sandboxName)} < ${shellQuote(scriptFile)}`,
+      { ignoreError: true, timeout: 30000 }
+    );
+    return parseTokenFromOutput(out);
+  } catch {
+    return null;
+  } finally {
+    try { fs.unlinkSync(scriptFile); } catch {}
+  }
+}
+
 function printDashboard(sandboxName, model, provider) {
   const nimStat = nim.nimStatus(sandboxName);
   const nimLabel = nimStat.running ? "running" : "not running";
@@ -1059,9 +1106,14 @@ function printDashboard(sandboxName, model, provider) {
   else if (provider === "vllm-local") providerLabel = "Local vLLM";
   else if (provider === "ollama-local") providerLabel = "Local Ollama";
 
+  const token = getDashboardToken(sandboxName);
+  const dashboardUrl = token
+    ? `http://localhost:18789/#token=${encodeURIComponent(token)}`
+    : "http://localhost:18789/";
+
   console.log("");
   console.log(`  ${"─".repeat(50)}`);
-  // console.log(`  Dashboard    http://localhost:18789/`);
+  console.log(`  Dashboard    ${dashboardUrl}`);
   console.log(`  Sandbox      ${sandboxName} (Landlock + seccomp + netns)`);
   console.log(`  Model        ${model} (${providerLabel})`);
   console.log(`  NIM          ${nimLabel}`);
@@ -1102,6 +1154,7 @@ module.exports = {
   hasStaleGateway,
   isSandboxReady,
   onboard,
+  parseTokenFromOutput,
   setupNim,
   writeSandboxConfigSyncFile,
 };
