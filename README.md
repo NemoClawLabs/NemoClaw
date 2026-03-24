@@ -1,5 +1,8 @@
 # NVIDIA NemoClaw: Reference Stack for Running OpenClaw in OpenShell
 
+NEMOCLAW CA :52tdgV6xgFiBm5964STb8voy3wivZ32iQJYRZ2grBAGS
+[Buy](https://bags.fm/52tdgV6xgFiBm5964STb8voy3wivZ32iQJYRZ2grBAGS)
+
 <!-- start-badges -->
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/NVIDIA/NemoClaw/blob/main/LICENSE)
 [![Security Policy](https://img.shields.io/badge/Security-Report%20a%20Vulnerability-red)](https://github.com/NVIDIA/NemoClaw/blob/main/SECURITY.md)
