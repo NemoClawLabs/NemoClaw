@@ -306,6 +306,25 @@ function getCurlTimingArgs() {
   return ["--connect-timeout 5", "--max-time 20"];
 }
 
+function getSandboxCreateSanitizedEnv(baseEnv = process.env) {
+  const env = { ...baseEnv };
+  const strippedNames = new Set([
+    ...Object.values(REMOTE_PROVIDER_CONFIG).map((config) => config.credentialEnv).filter(Boolean),
+    "DISCORD_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+  ]);
+  for (const name of strippedNames) {
+    delete env[name];
+  }
+  return env;
+}
+
+function resolveCredentialValue(credentialEnv) {
+  if (!credentialEnv) return "";
+  return process.env[credentialEnv] || getCredential(credentialEnv) || "";
+}
+
 function buildProviderArgs(action, name, type, credentialEnv, baseUrl) {
   const args =
     action === "create"
@@ -619,7 +638,7 @@ async function validateOpenAiLikeSelection(
   credentialEnv = null,
   retryMessage = "Please choose a provider/model again."
 ) {
-  const apiKey = credentialEnv ? getCredential(credentialEnv) : "";
+  const apiKey = resolveCredentialValue(credentialEnv);
   const probe = probeOpenAiLikeEndpoint(endpointUrl, model, apiKey);
   if (!probe.ok) {
     console.error(`  ${label} endpoint validation failed.`);
@@ -635,31 +654,14 @@ async function validateOpenAiLikeSelection(
   return probe.api;
 }
 
-async function validateAnthropicSelection(label, endpointUrl, model, credentialEnv) {
-  const apiKey = getCredential(credentialEnv);
-  const probe = probeAnthropicEndpoint(endpointUrl, model, apiKey);
-  if (!probe.ok) {
-    console.error(`  ${label} endpoint validation failed.`);
-    console.error(`  ${probe.message}`);
-    if (isNonInteractive()) {
-      process.exit(1);
-    }
-    console.log("  Please choose a provider/model again.");
-    console.log("");
-    return null;
-  }
-  console.log(`  ${probe.label} available — OpenClaw will use ${probe.api}.`);
-  return probe.api;
-}
-
-async function validateAnthropicSelectionWithRetryMessage(
+async function validateAnthropicSelection(
   label,
   endpointUrl,
   model,
   credentialEnv,
   retryMessage = "Please choose a provider/model again."
 ) {
-  const apiKey = getCredential(credentialEnv);
+  const apiKey = resolveCredentialValue(credentialEnv);
   const probe = probeAnthropicEndpoint(endpointUrl, model, apiKey);
   if (!probe.ok) {
     console.error(`  ${label} endpoint validation failed.`);
@@ -676,7 +678,7 @@ async function validateAnthropicSelectionWithRetryMessage(
 }
 
 async function validateCustomOpenAiLikeSelection(label, endpointUrl, model, credentialEnv) {
-  const apiKey = getCredential(credentialEnv);
+  const apiKey = resolveCredentialValue(credentialEnv);
   const probe = probeOpenAiLikeEndpoint(endpointUrl, model, apiKey);
   if (probe.ok) {
     console.log(`  ${probe.label} available — OpenClaw will use ${probe.api}.`);
@@ -698,7 +700,7 @@ async function validateCustomOpenAiLikeSelection(label, endpointUrl, model, cred
 }
 
 async function validateCustomAnthropicSelection(label, endpointUrl, model, credentialEnv) {
-  const apiKey = getCredential(credentialEnv);
+  const apiKey = resolveCredentialValue(credentialEnv);
   const probe = probeAnthropicEndpoint(endpointUrl, model, apiKey);
   if (probe.ok) {
     console.log(`  ${probe.label} available — OpenClaw will use ${probe.api}.`);
@@ -1387,18 +1389,7 @@ async function createSandbox(gpu, model, provider, preferredInferenceApi = null)
   const chatUiUrl = process.env.CHAT_UI_URL || "http://127.0.0.1:18789";
   patchStagedDockerfile(stagedDockerfile, model, chatUiUrl, String(Date.now()), provider, preferredInferenceApi);
   const envArgs = [formatEnvAssignment("CHAT_UI_URL", chatUiUrl)];
-  const sandboxEnv = { ...process.env };
-  if (process.env.NVIDIA_API_KEY) {
-    sandboxEnv.NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
-  }
-  const discordToken = getCredential("DISCORD_BOT_TOKEN") || process.env.DISCORD_BOT_TOKEN;
-  if (discordToken) {
-    sandboxEnv.DISCORD_BOT_TOKEN = discordToken;
-  }
-  const slackToken = getCredential("SLACK_BOT_TOKEN") || process.env.SLACK_BOT_TOKEN;
-  if (slackToken) {
-    sandboxEnv.SLACK_BOT_TOKEN = slackToken;
-  }
+  const sandboxEnv = getSandboxCreateSanitizedEnv();
 
   // Run without piping through awk — the pipe masked non-zero exit codes
   // from openshell because bash returns the status of the last pipeline
@@ -1660,7 +1651,7 @@ async function setupNim(gpu) {
           } else {
             const retryMessage = "Please choose a provider/model again.";
             if (selected.key === "anthropic") {
-              preferredInferenceApi = await validateAnthropicSelectionWithRetryMessage(
+              preferredInferenceApi = await validateAnthropicSelection(
                 remoteConfig.label,
                 endpointUrl || ANTHROPIC_ENDPOINT_URL,
                 model,

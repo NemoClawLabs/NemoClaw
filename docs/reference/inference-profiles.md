@@ -21,7 +21,8 @@ status: published
 # Inference Profiles
 
 NemoClaw configures inference through the OpenShell gateway.
-The agent inside the sandbox talks to `inference.local`, and OpenShell routes that traffic to the provider you selected during onboarding.
+The agent inside the sandbox talks to `inference.local`.
+OpenShell routes that traffic to the provider you selected during onboarding.
 
 ## Routed Provider Model
 

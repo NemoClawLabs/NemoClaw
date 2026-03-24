@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -10,9 +9,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildSandboxConfigSyncScript,
-  getFutureShellPathHint,
-  createSandbox,
-  getSandboxInferenceConfig,
   getFutureShellPathHint,
   createSandbox,
   getSandboxInferenceConfig,
@@ -36,12 +32,12 @@ describe("onboard helpers", () => {
       onboardedAt: "2026-03-18T12:00:00.000Z",
     });
 
-    assert.match(script, /cat > ~\/\.nemoclaw\/config\.json/);
-    assert.match(script, /"model": "nemotron-3-nano:30b"/);
-    assert.match(script, /"credentialEnv": "OPENAI_API_KEY"/);
-    assert.doesNotMatch(script, /cat > ~\/\.openclaw\/openclaw\.json/);
-    assert.doesNotMatch(script, /openclaw models set/);
-    assert.match(script, /^exit$/m);
+    expect(script).toMatch(/cat > ~\/\.nemoclaw\/config\.json/);
+    expect(script).toMatch(/"model": "nemotron-3-nano:30b"/);
+    expect(script).toMatch(/"credentialEnv": "OPENAI_API_KEY"/);
+    expect(script).not.toMatch(/cat > ~\/\.openclaw\/openclaw\.json/);
+    expect(script).not.toMatch(/openclaw models set/);
+    expect(script).toMatch(/^exit$/m);
   });
 
   it("patches the staged Dockerfile with the selected model and chat UI URL", () => {
@@ -62,27 +58,26 @@ describe("onboard helpers", () => {
     try {
       patchStagedDockerfile(dockerfilePath, "gpt-5.4", "http://127.0.0.1:19999", "build-123", "openai-api");
       const patched = fs.readFileSync(dockerfilePath, "utf8");
-      assert.match(patched, /^ARG NEMOCLAW_MODEL=gpt-5\.4$/m);
-      assert.match(patched, /^ARG NEMOCLAW_PROVIDER_KEY=openai$/m);
-      assert.match(patched, /^ARG NEMOCLAW_PRIMARY_MODEL_REF=openai\/gpt-5\.4$/m);
-      assert.match(patched, /^ARG CHAT_UI_URL=http:\/\/127\.0\.0\.1:19999$/m);
-      assert.match(patched, /^ARG NEMOCLAW_BUILD_ID=build-123$/m);
+      expect(patched).toMatch(/^ARG NEMOCLAW_MODEL=gpt-5\.4$/m);
+      expect(patched).toMatch(/^ARG NEMOCLAW_PROVIDER_KEY=openai$/m);
+      expect(patched).toMatch(/^ARG NEMOCLAW_PRIMARY_MODEL_REF=openai\/gpt-5\.4$/m);
+      expect(patched).toMatch(/^ARG CHAT_UI_URL=http:\/\/127\.0\.0\.1:19999$/m);
+      expect(patched).toMatch(/^ARG NEMOCLAW_BUILD_ID=build-123$/m);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
   it("maps NVIDIA Endpoints to the routed inference provider", () => {
-    assert.deepEqual(
+    expect(
       getSandboxInferenceConfig("qwen/qwen3.5-397b-a17b", "nvidia-prod", "openai-completions"),
-      {
+    ).toEqual({
         providerKey: "inference",
         primaryModelRef: "inference/qwen/qwen3.5-397b-a17b",
         inferenceBaseUrl: "https://inference.local/v1",
         inferenceApi: "openai-completions",
         inferenceCompat: null,
-      }
-    );
+      });
   });
 
   it("patches the staged Dockerfile for Anthropic with anthropic-messages routing", () => {
@@ -111,20 +106,20 @@ describe("onboard helpers", () => {
         "anthropic-prod"
       );
       const patched = fs.readFileSync(dockerfilePath, "utf8");
-      assert.match(patched, /^ARG NEMOCLAW_MODEL=claude-sonnet-4-5$/m);
-      assert.match(patched, /^ARG NEMOCLAW_PROVIDER_KEY=anthropic$/m);
-      assert.match(patched, /^ARG NEMOCLAW_PRIMARY_MODEL_REF=anthropic\/claude-sonnet-4-5$/m);
-      assert.match(patched, /^ARG NEMOCLAW_INFERENCE_BASE_URL=https:\/\/inference\.local$/m);
-      assert.match(patched, /^ARG NEMOCLAW_INFERENCE_API=anthropic-messages$/m);
+      expect(patched).toMatch(/^ARG NEMOCLAW_MODEL=claude-sonnet-4-5$/m);
+      expect(patched).toMatch(/^ARG NEMOCLAW_PROVIDER_KEY=anthropic$/m);
+      expect(patched).toMatch(/^ARG NEMOCLAW_PRIMARY_MODEL_REF=anthropic\/claude-sonnet-4-5$/m);
+      expect(patched).toMatch(/^ARG NEMOCLAW_INFERENCE_BASE_URL=https:\/\/inference\.local$/m);
+      expect(patched).toMatch(/^ARG NEMOCLAW_INFERENCE_API=anthropic-messages$/m);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
   it("maps Gemini to the routed inference provider with supportsStore disabled", () => {
-    assert.deepEqual(
+    expect(
       getSandboxInferenceConfig("gemini-2.5-flash", "gemini-api"),
-      {
+    ).toEqual({
         providerKey: "inference",
         primaryModelRef: "inference/gemini-2.5-flash",
         inferenceBaseUrl: "https://inference.local/v1",
@@ -132,21 +127,19 @@ describe("onboard helpers", () => {
         inferenceCompat: {
           supportsStore: false,
         },
-      }
-    );
+      });
   });
 
   it("uses a probed Responses API override when one is available", () => {
-    assert.deepEqual(
+    expect(
       getSandboxInferenceConfig("gpt-5.4", "openai-api", "openai-responses"),
-      {
+    ).toEqual({
         providerKey: "openai",
         primaryModelRef: "openai/gpt-5.4",
         inferenceBaseUrl: "https://inference.local/v1",
         inferenceApi: "openai-responses",
         inferenceCompat: null,
-      }
-    );
+      });
   });
 
   it("pins the gateway image to the installed OpenShell release version", () => {
@@ -243,12 +236,12 @@ const { setupInference } = require(${onboardPath});
 
     expect(result.status).toBe(0);
     const commands = JSON.parse(result.stdout.trim().split("\n").pop());
-    assert.equal(commands.length, 3);
-    assert.match(commands[0].command, /gateway' 'select' 'nemoclaw'/);
-    assert.match(commands[1].command, /'--credential' 'NVIDIA_API_KEY'/);
-    assert.doesNotMatch(commands[1].command, /nvapi-secret-value/);
-    assert.match(commands[1].command, /provider' 'create'/);
-    assert.match(commands[2].command, /inference' 'set'/);
+    expect(commands).toHaveLength(3);
+    expect(commands[0].command).toMatch(/gateway' 'select' 'nemoclaw'/);
+    expect(commands[1].command).toMatch(/'--credential' 'NVIDIA_API_KEY'/);
+    expect(commands[1].command).not.toMatch(/nvapi-secret-value/);
+    expect(commands[1].command).toMatch(/provider' 'create'/);
+    expect(commands[2].command).toMatch(/inference' 'set'/);
   });
 
   it("uses native Anthropic provider creation without embedding the secret in argv", () => {
@@ -311,14 +304,14 @@ const { setupInference } = require(${onboardPath});
       },
     });
 
-    assert.equal(result.status, 0, result.stderr);
+    expect(result.status).toBe(0);
     const commands = JSON.parse(result.stdout.trim().split("\n").pop());
-    assert.equal(commands.length, 3);
-    assert.match(commands[0].command, /gateway' 'select' 'nemoclaw'/);
-    assert.match(commands[1].command, /'--type' 'anthropic'/);
-    assert.match(commands[1].command, /'--credential' 'ANTHROPIC_API_KEY'/);
-    assert.doesNotMatch(commands[1].command, /sk-ant-secret-value/);
-    assert.match(commands[2].command, /'--provider' 'anthropic-prod'/);
+    expect(commands).toHaveLength(3);
+    expect(commands[0].command).toMatch(/gateway' 'select' 'nemoclaw'/);
+    expect(commands[1].command).toMatch(/'--type' 'anthropic'/);
+    expect(commands[1].command).toMatch(/'--credential' 'ANTHROPIC_API_KEY'/);
+    expect(commands[1].command).not.toMatch(/sk-ant-secret-value/);
+    expect(commands[2].command).toMatch(/'--provider' 'anthropic-prod'/);
   });
 
   it("updates OpenAI-compatible providers without passing an unsupported --type flag", () => {
@@ -383,14 +376,14 @@ const { setupInference } = require(${onboardPath});
       },
     });
 
-    assert.equal(result.status, 0, result.stderr);
+    expect(result.status).toBe(0);
     const commands = JSON.parse(result.stdout.trim().split("\n").pop());
-    assert.equal(commands.length, 4);
-    assert.match(commands[0].command, /gateway' 'select' 'nemoclaw'/);
-    assert.match(commands[1].command, /provider' 'create'/);
-    assert.match(commands[2].command, /provider' 'update' 'openai-api'/);
-    assert.doesNotMatch(commands[2].command, /'--type'/);
-    assert.match(commands[3].command, /inference' 'set' '--no-verify'/);
+    expect(commands).toHaveLength(4);
+    expect(commands[0].command).toMatch(/gateway' 'select' 'nemoclaw'/);
+    expect(commands[1].command).toMatch(/provider' 'create'/);
+    expect(commands[2].command).toMatch(/provider' 'update' 'openai-api'/);
+    expect(commands[2].command).not.toMatch(/'--type'/);
+    expect(commands[3].command).toMatch(/inference' 'set' '--no-verify'/);
   });
 
   it("drops stale local sandbox registry entries when the live sandbox is gone", () => {
@@ -429,10 +422,10 @@ console.log(JSON.stringify({ liveExists, sandbox: registry.getSandbox("my-assist
       },
     });
 
-    assert.equal(result.status, 0, result.stderr);
+    expect(result.status).toBe(0);
     const payload = JSON.parse(result.stdout.trim().split("\n").pop());
-    assert.equal(payload.liveExists, false);
-    assert.equal(payload.sandbox, null);
+    expect(payload.liveExists).toBe(false);
+    expect(payload.sandbox).toBe(null);
   });
 
   it("builds the sandbox without uploading an external OpenClaw config file", async () => {
@@ -488,6 +481,11 @@ const { createSandbox } = require(${onboardPath});
 
 (async () => {
   process.env.OPENSHELL_GATEWAY = "nemoclaw";
+  process.env.NVIDIA_API_KEY = "nvapi-secret-value";
+  process.env.OPENAI_API_KEY = "sk-openai-secret-value";
+  process.env.DISCORD_BOT_TOKEN = "discord-secret-value";
+  process.env.SLACK_BOT_TOKEN = "slack-secret-value";
+  process.env.TELEGRAM_BOT_TOKEN = "telegram-secret-value";
   const sandboxName = await createSandbox(null, "gpt-5.4");
   console.log(JSON.stringify({ sandboxName, commands }));
 })().catch((error) => {
@@ -508,17 +506,22 @@ const { createSandbox } = require(${onboardPath});
       },
     });
 
-    assert.equal(result.status, 0, result.stderr);
+    expect(result.status).toBe(0);
     const payload = JSON.parse(result.stdout.trim().split("\n").pop());
-    assert.equal(payload.sandboxName, "my-assistant");
+    expect(payload.sandboxName).toBe("my-assistant");
     const createCommand = payload.commands.find((entry) => entry.command.includes("'sandbox' 'create'"));
-    assert.ok(createCommand, "expected sandbox create command");
-    assert.match(createCommand.command, /'nemoclaw-start'/);
-    assert.doesNotMatch(createCommand.command, /'--upload'/);
-    assert.doesNotMatch(createCommand.command, /OPENCLAW_CONFIG_PATH/);
-    assert.doesNotMatch(createCommand.command, /NVIDIA_API_KEY=/);
-    assert.doesNotMatch(createCommand.command, /DISCORD_BOT_TOKEN=/);
-    assert.doesNotMatch(createCommand.command, /SLACK_BOT_TOKEN=/);
+    expect(createCommand).toBeTruthy();
+    expect(createCommand.command).toMatch(/'nemoclaw-start'/);
+    expect(createCommand.command).not.toMatch(/'--upload'/);
+    expect(createCommand.command).not.toMatch(/OPENCLAW_CONFIG_PATH/);
+    expect(createCommand.command).not.toMatch(/NVIDIA_API_KEY=/);
+    expect(createCommand.command).not.toMatch(/DISCORD_BOT_TOKEN=/);
+    expect(createCommand.command).not.toMatch(/SLACK_BOT_TOKEN=/);
+    expect(createCommand.env.NVIDIA_API_KEY).toBe(undefined);
+    expect(createCommand.env.OPENAI_API_KEY).toBe(undefined);
+    expect(createCommand.env.DISCORD_BOT_TOKEN).toBe(undefined);
+    expect(createCommand.env.SLACK_BOT_TOKEN).toBe(undefined);
+    expect(createCommand.env.TELEGRAM_BOT_TOKEN).toBe(undefined);
   });
 
   it("accepts gateway inference when system inference is separately not configured", () => {
@@ -584,9 +587,9 @@ const { setupInference } = require(${onboardPath});
       },
     });
 
-    assert.equal(result.status, 0, result.stderr);
+    expect(result.status).toBe(0);
     const commands = JSON.parse(result.stdout.trim().split("\n").pop());
-    assert.equal(commands.length, 3);
+    expect(commands).toHaveLength(3);
   });
 
   it("accepts gateway inference output that omits the Route line", () => {
@@ -651,9 +654,9 @@ const { setupInference } = require(${onboardPath});
       },
     });
 
-    assert.equal(result.status, 0, result.stderr);
+    expect(result.status).toBe(0);
     const commands = JSON.parse(result.stdout.trim().split("\n").pop());
-    assert.equal(commands.length, 3);
+    expect(commands).toHaveLength(3);
   });
 
 });

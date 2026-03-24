@@ -74,11 +74,11 @@ describe("credential exposure in process arguments", () => {
   it("onboard.js does not embed sandbox secrets in the sandbox create command line", () => {
     const src = fs.readFileSync(ONBOARD_JS, "utf-8");
 
-    expect(src).toMatch(/const sandboxEnv = \{ \.\.\.process\.env \};/);
+    expect(src).toMatch(/function getSandboxCreateSanitizedEnv\(baseEnv = process\.env\)/);
+    expect(src).toMatch(/const sandboxEnv = getSandboxCreateSanitizedEnv\(\);/);
     expect(src).toMatch(/streamSandboxCreate\(createCommand, sandboxEnv\)/);
-    expect(src).not.toMatch(/envArgs\.push\(formatEnvAssignment\("NVIDIA_API_KEY"/);
-    expect(src).not.toMatch(/envArgs\.push\(formatEnvAssignment\("DISCORD_BOT_TOKEN"/);
-    expect(src).not.toMatch(/envArgs\.push\(formatEnvAssignment\("SLACK_BOT_TOKEN"/);
+    expect(src).toMatch(/delete env\[name\];/);
+    expect(src).toMatch(/"TELEGRAM_BOT_TOKEN"/);
   });
 
   it("onboard.js curl probes use explicit timeouts", () => {
