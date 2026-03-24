@@ -414,6 +414,19 @@ fi
 if [ "$1" = "pack" ]; then
   exit 1
 fi
+if [ "$1" = "install" ] && [[ "$*" == *"-g"* ]]; then
+  mkdir -p "$NPM_PREFIX/bin"
+  cat > "$NPM_PREFIX/bin/nemoclaw" <<'EOS'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "v0.1.0-test"
+  exit 0
+fi
+exit 0
+EOS
+  chmod +x "$NPM_PREFIX/bin/nemoclaw"
+  exit 0
+fi
 if [ "$1" = "install" ] && [[ "$*" == *"--ignore-scripts"* ]]; then
   exit 0
 fi
