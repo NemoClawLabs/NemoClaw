@@ -437,15 +437,26 @@ async function preflight() {
   return gpu;
 }
 
+// ── Gateway cleanup ──────────────────────────────────────────────
+
+const GATEWAY_NAME = "nemoclaw";
+
+function destroyGateway() {
+  run(`openshell gateway destroy -g ${GATEWAY_NAME} 2>/dev/null || true`, { ignoreError: true });
+  // openshell gateway destroy doesn't remove Docker volumes, which leaves
+  // corrupted cluster state that breaks the next gateway start. Clean them up.
+  run(`docker volume ls -q --filter "name=openshell-cluster-${GATEWAY_NAME}" | xargs -r docker volume rm 2>/dev/null || true`, { ignoreError: true });
+}
+
 // ── Step 2: Gateway ──────────────────────────────────────────────
 
 async function startGateway(gpu) {
   step(2, 7, "Starting OpenShell gateway");
 
-  // Destroy old gateway
-  run("openshell gateway destroy -g nemoclaw 2>/dev/null || true", { ignoreError: true });
+  // Clean up any previous gateway and its Docker volumes
+  destroyGateway();
 
-  const gwArgs = ["--name", "nemoclaw"];
+  const gwArgs = ["--name", GATEWAY_NAME];
   // Do NOT pass --gpu here. On DGX Spark (and most GPU hosts), inference is
   // routed through a host-side provider (Ollama, vLLM, or cloud API) — the
   // sandbox itself does not need direct GPU access. Passing --gpu causes
@@ -462,10 +473,13 @@ async function startGateway(gpu) {
     console.log(`  Using pinned OpenShell gateway image: ${stableGatewayImage}`);
   }
 
-  run(`openshell gateway start ${gwArgs.join(" ")}`, {
-    ignoreError: false,
-    env: gatewayEnv,
-  });
+  const startResult = run(`openshell gateway start ${gwArgs.join(" ")}`, { ignoreError: true, env: gatewayEnv });
+  if (startResult.status !== 0) {
+    console.error("  Gateway failed to start. Cleaning up stale state...");
+    destroyGateway();
+    console.error("  Stale state removed. Please rerun: nemoclaw onboard");
+    process.exit(1);
+  }
 
   // Verify health
   for (let i = 0; i < 5; i++) {
@@ -475,7 +489,9 @@ async function startGateway(gpu) {
       break;
     }
     if (i === 4) {
-      console.error("  Gateway failed to start. Run: openshell gateway info");
+      console.error("  Gateway health check failed. Cleaning up stale state...");
+      destroyGateway();
+      console.error("  Stale state removed. Please rerun: nemoclaw onboard");
       process.exit(1);
     }
     sleep(2);
