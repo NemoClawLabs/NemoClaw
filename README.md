@@ -1,8 +1,8 @@
 # NVIDIA NemoClaw: Reference Stack for Running OpenClaw in OpenShell
 
-NEMOCLAW CA :
+NEMOCLAW CA : 0xcdfeEb91571A0bF8B4ED1388237dd23FeE967777
 ###
-$NEMOCLAW on Bags
+$NEMOCLAW on Bnbshare 
 ###
 
 
