@@ -15,9 +15,9 @@ import type { OpenShellRuntimeSelection } from "../../adapters/openshell/runtime
 import { getSandboxInferenceConfig } from "../../inference/config";
 import { validateInferenceResponseBody } from "../../inference/health";
 import {
-  GEMINI_PROBE_REPLY_TOKENS,
   MIN_PROBE_REPLY_TOKENS,
   resolveMaxTokensField,
+  resolveProbeReplyTokens,
 } from "../../inference/max-tokens-field";
 import { ROOT, shellQuote } from "../../runner";
 import { buildSubprocessEnv } from "../../subprocess-env";
@@ -99,10 +99,7 @@ function buildProbeRequest(input: SandboxInferenceInvocationInput): {
     headers: [],
     payload: {
       model: input.model,
-      [resolveMaxTokensField(input.model)]:
-        input.provider === "gemini-api"
-          ? GEMINI_PROBE_REPLY_TOKENS
-          : MIN_PROBE_REPLY_TOKENS,
+      [resolveMaxTokensField(input.model)]: resolveProbeReplyTokens(input.provider),
       messages: [{ role: "user", content: "Reply with OK" }],
       stream: false,
     },
