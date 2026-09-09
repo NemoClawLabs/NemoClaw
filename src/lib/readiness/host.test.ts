@@ -27,6 +27,7 @@ const ajv = new Ajv2020({ allErrors: true, strict: true });
 ajv.addFormat("date-time", { type: "string", validate: () => true });
 const validateReport = ajv.compile(systemReadinessSchema as AnySchema);
 
+/** Return the smallest neutral platform identity used by host-readiness tests. */
 function emptyPlatformIdentity(): PlatformIdentity {
   return {
     productName: null,
