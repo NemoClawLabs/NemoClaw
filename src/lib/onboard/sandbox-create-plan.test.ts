@@ -131,7 +131,7 @@ function materializeDiscordCreatePlan(
   return materializeSandboxCreatePlan({
     ...resolved,
     fromRef: "/tmp/Dockerfile",
-    runProviderPreDeleteCleanup: vi.fn(),
+    runProviderPreDeleteCleanup: vi.fn(async () => {}),
     upsertMessagingProviders: vi.fn(() => [discordProviderName]),
     getHermesToolGatewayProviderName: vi.fn(),
     ...overrides,
@@ -170,7 +170,7 @@ async function expectCredentialBindingFailure({
     policyPath: "/tmp/policy.yaml",
     appliedPresets: [],
   }));
-  const cleanupProviders = vi.fn();
+  const cleanupProviders = vi.fn(async () => {});
   const upsertProviders = vi.fn(() => []);
 
   await expect(
@@ -269,7 +269,7 @@ describe("prepareSandboxCreatePolicy", () => {
       fromRef: "/tmp/Dockerfile",
       messagingTokenDefs,
       messagingConfig: { WECHAT_BASE_URL: "https://idc-37.weixin.qq.com" },
-      runProviderPreDeleteCleanup: vi.fn(),
+      runProviderPreDeleteCleanup: vi.fn(async () => {}),
       upsertMessagingProviders: vi.fn(() => [providerName]),
       getHermesToolGatewayProviderName: vi.fn(),
     });
@@ -335,9 +335,7 @@ describe("resolveSandboxCreatePolicyTier", () => {
       [],
       expect.objectContaining({ policyTier: "balanced" }),
     );
-    expect(plan.initialSandboxPolicy.appliedPresets).toContain(
-      "openclaw-diagnostics-otel-local",
-    );
+    expect(plan.initialSandboxPolicy.appliedPresets).toContain("openclaw-diagnostics-otel-local");
     expect(plan).not.toHaveProperty("policyTier");
   });
 });
@@ -516,7 +514,7 @@ describe("resolveSandboxCreateIntent", () => {
       selected: true,
     });
     const cleanupPolicy = vi.fn(() => true);
-    const cleanupProviders = vi.fn();
+    const cleanupProviders = vi.fn(async () => {});
     const upsertMessagingProviders = vi.fn(() => [discordProviderName]);
 
     await expect(
@@ -568,7 +566,7 @@ describe("resolveSandboxCreateIntent", () => {
       intent,
       fromRef: "/tmp/Dockerfile",
       messagingTokenDefs: [],
-      runProviderPreDeleteCleanup: vi.fn(),
+      runProviderPreDeleteCleanup: vi.fn(async () => {}),
       upsertMessagingProviders,
       getHermesToolGatewayProviderName: vi.fn(),
       prepareInitialSandboxCreatePolicy: vi.fn(() => ({
@@ -616,7 +614,7 @@ describe("resolveSandboxCreateIntent", () => {
       fromRef: "/tmp/nemoclaw-build-1/Dockerfile",
       messagingTokenDefs: [],
       prepareInitialSandboxCreatePolicy: preparePolicy,
-      runProviderPreDeleteCleanup: vi.fn(),
+      runProviderPreDeleteCleanup: vi.fn(async () => {}),
       upsertMessagingProviders: vi.fn(() => []),
       getHermesToolGatewayProviderName: vi.fn(() => "sandbox-hermes-tools"),
     });
@@ -677,7 +675,9 @@ describe("resolveSandboxCreateIntent", () => {
         events.push("disclose");
         expect(policy.appliedPresets).toEqual(["telegram"]);
       },
-      runProviderPreDeleteCleanup: () => events.push("cleanup"),
+      runProviderPreDeleteCleanup: async () => {
+        events.push("cleanup");
+      },
       upsertMessagingProviders: vi.fn((receivedTokenDefs, options) => {
         events.push("upsert");
         expect(receivedTokenDefs).toEqual(tokenDefs);
@@ -754,7 +754,9 @@ describe("resolveSandboxCreateIntent", () => {
       events.push("policy-cleanup");
       return true;
     });
-    const runProviderPreDeleteCleanup = vi.fn(() => events.push("provider-cleanup"));
+    const runProviderPreDeleteCleanup = vi.fn(async () => {
+      events.push("provider-cleanup");
+    });
     const upsertMessagingProviders = vi.fn(() => {
       events.push("upsert");
       return ["sandbox-telegram-bridge"];
@@ -817,7 +819,7 @@ describe("resolveSandboxCreateIntent", () => {
         policyPath: "/tmp/policy.yaml",
         appliedPresets: [],
       }),
-      runProviderPreDeleteCleanup: vi.fn(),
+      runProviderPreDeleteCleanup: vi.fn(async () => {}),
       upsertMessagingProviders: vi.fn(() => []),
       getHermesToolGatewayProviderName: vi.fn(),
     });
@@ -891,7 +893,7 @@ describe("resolveSandboxCreateIntent", () => {
         fromRef: "/tmp/nemoclaw-build-1/Dockerfile",
         messagingTokenDefs: [],
         prepareInitialSandboxCreatePolicy: vi.fn(),
-        runProviderPreDeleteCleanup: vi.fn(),
+        runProviderPreDeleteCleanup: vi.fn(async () => {}),
         upsertMessagingProviders: vi.fn(() => []),
         getHermesToolGatewayProviderName: vi.fn(),
       }),
@@ -925,7 +927,7 @@ describe("resolveSandboxCreateIntent", () => {
         policyPath: "/tmp/policy.yaml",
         appliedPresets: [],
       })),
-      runProviderPreDeleteCleanup: vi.fn(),
+      runProviderPreDeleteCleanup: vi.fn(async () => {}),
       upsertMessagingProviders: vi.fn(() => []),
       getHermesToolGatewayProviderName: vi.fn(),
     });
@@ -986,7 +988,7 @@ describe("resolveSandboxCreateIntent", () => {
         policyPath: "/tmp/policy.yaml",
         appliedPresets: [],
       })),
-      runProviderPreDeleteCleanup: vi.fn(),
+      runProviderPreDeleteCleanup: vi.fn(async () => {}),
       upsertMessagingProviders: vi.fn(() => []),
       getHermesToolGatewayProviderName: vi.fn(),
     });
@@ -1041,7 +1043,7 @@ describe("resolveSandboxCreateIntent", () => {
         policyPath: "/tmp/policy.yaml",
         appliedPresets: [],
       })),
-      runProviderPreDeleteCleanup: vi.fn(),
+      runProviderPreDeleteCleanup: vi.fn(async () => {}),
       upsertMessagingProviders: vi.fn(() => []),
       getHermesToolGatewayProviderName: vi.fn(),
     });
@@ -1090,7 +1092,7 @@ describe("resolveSandboxCreateIntent", () => {
           policyPath: "/tmp/policy.yaml",
           appliedPresets: [],
         })),
-        runProviderPreDeleteCleanup: vi.fn(),
+        runProviderPreDeleteCleanup: vi.fn(async () => {}),
         upsertMessagingProviders: vi.fn(() => []),
         getHermesToolGatewayProviderName: vi.fn(),
       }),
@@ -1115,7 +1117,7 @@ describe("resolveSandboxCreateIntent", () => {
       sandboxGpuLogMessage: null,
     });
     const cleanupPolicy = vi.fn(() => true);
-    const cleanupProviders = vi.fn();
+    const cleanupProviders = vi.fn(async () => {});
     const upsertProviders = vi.fn(() => []);
 
     await expect(
@@ -1155,7 +1157,7 @@ describe("resolveSandboxCreateIntent", () => {
           appliedPresets: [],
           cleanup: cleanupPolicy,
         })),
-        runProviderPreDeleteCleanup: vi.fn(),
+        runProviderPreDeleteCleanup: vi.fn(async () => {}),
         upsertMessagingProviders: async () => {
           throw providerFailure;
         },
@@ -1246,7 +1248,7 @@ describe("resolveSandboxCreateIntent", () => {
         policyPath: "/tmp/policy.yaml",
         appliedPresets: [],
       })),
-      runProviderPreDeleteCleanup: vi.fn(),
+      runProviderPreDeleteCleanup: vi.fn(async () => {}),
       upsertMessagingProviders: vi.fn(() => []),
       getHermesToolGatewayProviderName: vi.fn(),
     });
