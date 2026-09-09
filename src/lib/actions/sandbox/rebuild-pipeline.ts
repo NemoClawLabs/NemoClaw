@@ -83,7 +83,10 @@ import {
   recordRebuildRecoveryBackup,
 } from "./rebuild-recreate-journal";
 import { runRebuildRecreatePhase } from "./rebuild-recreate-phase";
-import { createRebuildRegistryRollback } from "./rebuild-registry-rollback";
+import {
+  createRebuildRegistryRollback,
+  persistSandboxStopIntent,
+} from "./rebuild-registry-rollback";
 import { runRebuildRestorePhase } from "./rebuild-restore-phase";
 
 export { buildRefreshMutableOpenClawConfigHashCommand, stageMessagingManifestPlanForRebuild };
@@ -898,6 +901,11 @@ async function rebuildSandboxUnlocked(
           );
         }
         retireRemovedImmutabilityStateRecord(sandboxName, "mutable-rebuild");
+      }
+      if (!persistSandboxStopIntent(sandboxName, false)) {
+        return bail(
+          `Sandbox '${sandboxName}' was rebuilt, but NemoClaw could not clear its intentional-stop record. Run 'nemoclaw ${sandboxName} status' before another lifecycle command.`,
+        );
       }
       if (backup.backupManifest) {
         if (
