@@ -885,6 +885,9 @@ const SERVING_READINESS_REGISTRY: ServingCatalogRegistries["readiness"] =
       { kind: "observation", valueType: "string", role: "architecture" },
     ],
     ["host.os.wsl", { kind: "observation", valueType: "boolean" }],
+    ["host.os.distribution", { kind: "observation", valueType: "string" }],
+    ["host.os.version", { kind: "observation", valueType: "version" }],
+    ["host.os.pretty_name", { kind: "observation", valueType: "string" }],
     [
       "host.docker.runtime",
       { kind: "observation", valueType: "string", role: "container-runtime" },
