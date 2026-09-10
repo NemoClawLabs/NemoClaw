@@ -26,6 +26,7 @@ import {
   isValidNemoClawRuntimeProvider,
   isValidNemoClawSandboxName,
   isSupportedInferenceApi,
+  NemoClawAgentToolsConfigSchema,
 } from "../../config/model";
 import { fingerprintOpenShellSandboxId } from "../sandbox/openshell-identity";
 import { ExportSourceValuesSchema } from "./export-evidence";
@@ -88,7 +89,15 @@ const EXPORT_AGENT_PROFILE_PROJECTIONS: Record<
 
 type VerifiedExportSourceData = Pick<
   VerifiedExportSource,
-  "agent" | "gateway" | "inference" | "policy" | "proxy" | "runtime" | "sandboxName" | "webSearch"
+  | "agent"
+  | "gateway"
+  | "inference"
+  | "policy"
+  | "proxy"
+  | "runtime"
+  | "sandboxName"
+  | "tools"
+  | "webSearch"
 >;
 
 function verifiedExportSource(data: VerifiedExportSourceData): VerifiedExportSource {
@@ -127,6 +136,11 @@ function hasBraveSearch(entry: ObservedExportRegistry): boolean {
 
 function classifyHermesExcludedCapabilities(entry: ObservedExportRegistry): ExportFinding[] {
   const excluded: Array<[string, unknown, string]> = [
+    [
+      "spec.sandboxes[].agents[0].tools.disclosure",
+      entry.agent === "hermes" && entry.toolDisclosure === "direct",
+      "direct tool disclosure for Hermes",
+    ],
     ["spec.sandboxes[].agents[0].tools", entry.hermesToolGateways, "enabled Hermes tool gateways"],
     [
       "spec.sandboxes[].agents[0].dashboard",
@@ -188,11 +202,6 @@ function classifyExcludedCapabilities(entry: ObservedExportRegistry): ExportFind
       "secondary agents or added agent plugins",
     ],
     [
-      "spec.sandboxes[].agents[0].toolDisclosure",
-      entry.toolDisclosure === "direct",
-      "direct tool disclosure",
-    ],
-    [
       "spec.sandboxes[].agents[0].dashboard",
       entry.dashboardRemoteBindPrepared,
       "remote dashboard exposure",
@@ -231,6 +240,17 @@ function classifyHermesApiConfiguration(entry: ObservedExportRegistry): ExportFi
 
 function classifyRegistryProvenance(entry: ObservedExportRegistry): ExportFinding[] {
   const findings: ExportFinding[] = [];
+  if (
+    entry.toolDisclosure !== undefined &&
+    !Check(NemoClawAgentToolsConfigSchema, { disclosure: entry.toolDisclosure })
+  )
+    findings.push(
+      finding(
+        "spec.sandboxes[].agents[0].tools.disclosure",
+        "unsupported",
+        "The persisted tool disclosure is not a supported mode.",
+      ),
+    );
   if (!entry.lifecycleGeneration || !entry.lifecycleLiveIdentityFingerprint)
     findings.push(
       finding(
@@ -353,6 +373,12 @@ export function classifyExportRegistry(entry: ObservedExportRegistry): ExportFin
   return findings;
 }
 
+function registeredToolDisclosure(
+  entry: ObservedExportRegistry,
+): ManagedStartupProfileBuilderInput["toolDisclosure"] {
+  return entry.agent === "openclaw" ? (entry.toolDisclosure ?? "progressive") : "progressive";
+}
+
 function expectedManagedStartupProfile(entry: ObservedExportRegistry): ManagedStartupProfile {
   if (entry.agent !== "openclaw" && entry.agent !== "hermes") {
     throw new Error("The agent is unsupported.");
@@ -388,7 +414,7 @@ function expectedManagedStartupProfile(entry: ObservedExportRegistry): ManagedSt
     },
     dashboard: projection.dashboard,
     webSearch: hasBraveSearch(entry) ? { fetchEnabled: true, provider: "brave" } : null,
-    toolDisclosure: "progressive",
+    toolDisclosure: registeredToolDisclosure(entry),
     hermesToolGateways: [],
     messagingPlan: null,
     dcodeAutoApprovalMode: null,
@@ -426,6 +452,15 @@ function classifyManagedStartupProfile(
     ];
   }
   const findings: ExportFinding[] = [];
+  if (entry.agent === "openclaw" && profile.tools.disclosure !== expected.tools.disclosure) {
+    findings.push(
+      finding(
+        "spec.sandboxes[].agents[0].tools.disclosure",
+        entry.toolDisclosure === undefined ? "missing-provenance" : "drifted",
+        "The retained tool disclosure and the registry selection do not agree.",
+      ),
+    );
+  }
   if (!hasEqualJsonStructure(profile.inference, expected.inference)) {
     findings.push(
       finding(
@@ -882,6 +917,22 @@ function inspectWorkload(entry: ObservedExportRegistry) {
   return { authority, findings };
 }
 
+function exportInferenceValues(snapshot: QualifiedExportSnapshot) {
+  const selected = normalizeInferenceSelection(snapshot.registry);
+  const inference = {
+    provider: selected.provider,
+    model: selected.model,
+    api: selected.preferredInferenceApi,
+  };
+  return snapshot.inference.topology === "managed"
+    ? { ...inference, serving: snapshot.inference.managedServing?.serving }
+    : {
+        ...inference,
+        endpoint: selected.endpointUrl,
+        ...(selected.credentialEnv === null ? {} : { credentialEnv: selected.credentialEnv }),
+      };
+}
+
 function completeVerifiedSource(
   requestedSandboxName: string,
   snapshot: QualifiedExportSnapshot,
@@ -889,7 +940,6 @@ function completeVerifiedSource(
   policy: CanonicalExportPolicy,
 ): ExportSourceVerificationResult {
   const entry = snapshot.registry;
-  const selected = normalizeInferenceSelection(entry);
   const proxy = authority?.profile.proxy;
   const values = {
     sandboxName: requestedSandboxName,
@@ -905,24 +955,13 @@ function completeVerifiedSource(
       : {}),
     runtime: { provider: entry.openshellDriver, imageRef: authority?.receipt.reference },
     gateway: { name: snapshot.gateway.name, port: snapshot.gateway.port },
+    ...(entry.agent === "openclaw" && authority?.profile.tools.disclosure === "direct"
+      ? { tools: { disclosure: authority.profile.tools.disclosure } }
+      : {}),
     ...(proxy && !hasEqualJsonStructure(proxy, expectedManagedStartupProfile(entry).proxy)
       ? { proxy: { host: proxy.managedHost, port: proxy.managedPort } }
       : {}),
-    inference:
-      snapshot.inference.topology === "managed"
-        ? {
-            provider: selected.provider,
-            model: selected.model,
-            api: selected.preferredInferenceApi,
-            serving: snapshot.inference.managedServing?.serving,
-          }
-        : {
-            provider: selected.provider,
-            model: selected.model,
-            api: selected.preferredInferenceApi,
-            endpoint: selected.endpointUrl,
-            ...(selected.credentialEnv === null ? {} : { credentialEnv: selected.credentialEnv }),
-          },
+    inference: exportInferenceValues(snapshot),
   };
   if (!Check(ExportSourceValuesSchema, values)) {
     return {

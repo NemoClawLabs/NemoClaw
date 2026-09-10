@@ -314,19 +314,33 @@ const NemoClawInferenceRouteConfigSchema = Type.Object(
   { additionalProperties: false },
 );
 
-const NemoClawAgentConfigSchema = Type.Object(
-  {
-    name: LocalResourceNameSchema,
-    type: NemoClawAgentTypeSchema,
-    inference: Type.Object(
-      {
-        routes: Type.Array(NemoClawInferenceRouteConfigSchema, { minItems: 1 }),
-      },
-      { additionalProperties: false },
-    ),
-  },
+export const NemoClawAgentToolsConfigSchema = Type.Object(
+  { disclosure: Type.Union([Type.Literal("progressive"), Type.Literal("direct")]) },
   { additionalProperties: false },
 );
+
+const nemoClawAgentFields = {
+  name: LocalResourceNameSchema,
+  inference: Type.Object(
+    { routes: Type.Array(NemoClawInferenceRouteConfigSchema, { minItems: 1 }) },
+    { additionalProperties: false },
+  ),
+};
+
+const NemoClawAgentConfigSchema = Type.Union([
+  Type.Object(
+    {
+      ...nemoClawAgentFields,
+      type: Type.Literal("openclaw"),
+      tools: Type.Optional(NemoClawAgentToolsConfigSchema),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { ...nemoClawAgentFields, type: Type.Literal("hermes") },
+    { additionalProperties: false },
+  ),
+]);
 
 const NemoClawManagedImageConfigSchema = Type.Object(
   { ref: ImmutableImageReferenceSchema },

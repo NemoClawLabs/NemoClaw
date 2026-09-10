@@ -10,6 +10,7 @@ import {
   InferenceEndpointSchema,
   LocalResourceNameSchema,
   NemoClawInferenceApiSchema,
+  NemoClawAgentToolsConfigSchema,
   NemoClawBraveSearchConfigSchema,
   NemoClawAgentTypeSchema,
   NemoClawManagedProxyConfigSchema,
@@ -261,18 +262,22 @@ const ExportInferenceSchema = Type.Union([
 ]);
 
 /** Representable values only; provenance and policy qualification remain separate. */
-export const ExportSourceValuesSchema = Type.Object({
-  sandboxName: Type.Refine(SandboxNameSchema, isValidNemoClawSandboxName),
-  agent: NemoClawAgentTypeSchema,
-  runtime: Type.Object({
-    provider: RuntimeProviderSchema,
-    imageRef: ImmutableImageReferenceSchema,
+export const ExportSourceValuesSchema = Type.Refine(
+  Type.Object({
+    sandboxName: Type.Refine(SandboxNameSchema, isValidNemoClawSandboxName),
+    agent: NemoClawAgentTypeSchema,
+    runtime: Type.Object({
+      provider: RuntimeProviderSchema,
+      imageRef: ImmutableImageReferenceSchema,
+    }),
+    gateway: Type.Object({ name: LocalResourceNameSchema, port: TcpPortSchema }),
+    proxy: Type.Optional(NemoClawManagedProxyConfigSchema),
+    inference: ExportInferenceSchema,
+    tools: Type.Optional(NemoClawAgentToolsConfigSchema),
+    webSearch: Type.Optional(NemoClawBraveSearchConfigSchema),
   }),
-  gateway: Type.Object({ name: LocalResourceNameSchema, port: TcpPortSchema }),
-  proxy: Type.Optional(NemoClawManagedProxyConfigSchema),
-  inference: ExportInferenceSchema,
-  webSearch: Type.Optional(NemoClawBraveSearchConfigSchema),
-});
+  (value) => value.agent === "openclaw" || value.tools === undefined,
+);
 
 type ExportSourceValues = DeepReadonly<TypeBoxModule.Type.Static<typeof ExportSourceValuesSchema>>;
 export type VerifiedExportGateway = ExportSourceValues["gateway"];

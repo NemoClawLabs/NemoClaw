@@ -75,13 +75,16 @@ export function buildExportConfig(
             policy: { explicit: source.policy },
             ...(source.proxy === undefined ? {} : { proxy: source.proxy }),
           },
-          ...(source.webSearch === undefined
-            ? {}
-            : { integrations: { webSearch: source.webSearch } }),
+          ...(source.webSearch && { integrations: { webSearch: source.webSearch } }),
           agents: [
             {
               name: "primary",
-              type: source.agent,
+              ...(source.agent === "openclaw"
+                ? {
+                    type: source.agent,
+                    ...(source.tools === undefined ? {} : { tools: source.tools }),
+                  }
+                : { type: source.agent }),
               inference: {
                 routes: [
                   {

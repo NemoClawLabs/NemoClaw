@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
 import { managedBraveProfile } from "../../../../test/fixtures/openshell-provider-profile";
@@ -45,10 +46,9 @@ import { resolveManagedStartupInferenceRoute } from "../../inference/gateway/rou
 import type { ObservedManagedVllmRuntime } from "../../domain/config/export-evidence";
 import { getLiveGatewayInference } from "../../inference/live";
 import { resolveGatewayStateDirForPort } from "../../onboard/gateway/state-dir";
-import {
-  buildManagedStartupProfile,
-  type ManagedStartupProfileBuilderInput,
-} from "../../onboard/managed-startup/profile-builder";
+import { buildManagedStartupProfile } from "../../onboard/managed-startup/profile-builder";
+import type { ManagedStartupProfileBuilderInput } from "../../onboard/managed-startup/profile-builder";
+import { encodeManagedStartupProfile } from "../../onboard/managed-startup/profile";
 import { getSandboxEntryInference } from "../../state/registry-entry-view";
 import { load as loadRegistry } from "../../state/registry/persistence";
 import type { SandboxEntry } from "../../state/registry/types";
@@ -94,7 +94,7 @@ const startupInput = {
 } satisfies ManagedStartupProfileBuilderInput;
 const startup = buildManagedStartupProfile(startupInput);
 
-const entry: SandboxEntry = {
+const entry = {
   name: "alpha",
   createdAt: "not-export-evidence",
   agent: "openclaw",
@@ -124,7 +124,7 @@ const entry: SandboxEntry = {
     credentialProxyReplayRequired: false,
     shared: true,
   },
-};
+} satisfies SandboxEntry;
 
 const raw = {
   getProvider: vi.fn(),
@@ -521,6 +521,27 @@ describe("live export snapshot reader", () => {
     expect(raw.getProvider).not.toHaveBeenCalled();
   });
 
+  it("retains direct tool selection through the live reader and stable verifier", async () => {
+    const profile = {
+      ...startup.profile,
+      tools: { ...startup.profile.tools, disclosure: "direct" as const },
+    };
+    const encodedProfile = encodeManagedStartupProfile(profile);
+    mockSupportedLiveSource(3, 3, {
+      ...entry,
+      toolDisclosure: "direct",
+      workload: {
+        ...entry.workload,
+        encodedProfile,
+        startupProfileSha256: createHash("sha256").update(encodedProfile, "utf8").digest("hex"),
+      },
+    });
+    const result = await observeStableExportSource("alpha", createLiveExportSnapshotReader());
+    expect(result).toMatchObject({ ok: true, source: { tools: { disclosure: "direct" } } });
+    expect(raw.getSandbox).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(result)).not.toContain(readFailureCanary);
+  });
+
   it("returns a complete non-secret raw snapshot", async () => {
     vi.stubEnv("NVIDIA_INFERENCE_API_KEY", readFailureCanary);
     mockSupportedLiveSource();
@@ -870,6 +891,7 @@ describe("live export snapshot reader", () => {
 function mockManagedVllmSource(
   environmentOverrides: NodeJS.ProcessEnv = {},
   webSearch: ManagedStartupProfileBuilderInput["webSearch"] = null,
+  toolDisclosure: ManagedStartupProfileBuilderInput["toolDisclosure"] = "progressive",
 ) {
   const catalog = loadServingCatalog();
   const provenance = servingProfileProvenance(catalog, EXPORTED_VLLM_PROFILE_ID);
@@ -910,7 +932,7 @@ function mockManagedVllmSource(
       wslExposure: false,
     },
     webSearch,
-    toolDisclosure: "progressive",
+    toolDisclosure,
     hermesToolGateways: [],
     messagingPlan: null,
     dcodeAutoApprovalMode: null,
@@ -925,6 +947,7 @@ function mockManagedVllmSource(
     endpointUrl: "http://host.openshell.internal:18000/v1",
     credentialEnv: null,
     servingProfileProvenance: provenance,
+    toolDisclosure,
     webSearchEnabled: webSearch !== null,
     webSearchProvider: webSearch?.provider ?? null,
     workload: {
@@ -1034,8 +1057,8 @@ describe("managed vLLM export pipeline", () => {
     expect(publish).not.toHaveBeenCalled();
   });
 
-  it("exports managed vLLM and Brave with both qualified profile bindings", async () => {
-    const f = mockManagedVllmSource({}, { fetchEnabled: true, provider: "brave" });
+  it("exports direct tools with managed vLLM and Brave after qualifying both profiles", async () => {
+    const f = mockManagedVllmSource({}, { fetchEnabled: true, provider: "brave" }, "direct");
     const search = braveProvider();
     const readManagedProvider = raw.getProvider.getMockImplementation()!;
     const readManagedProfile = raw.getProviderProfile.getMockImplementation()!;
@@ -1052,8 +1075,36 @@ describe("managed vLLM export pipeline", () => {
     raw.getSandbox.mockResolvedValue(liveSandbox);
     const { result, writeStdout, publish } = await exportLiveSource();
     expect(result).toEqual({ ok: true, completion: { kind: "stdout" } });
-    const document = validateNemoClawConfig(YAML.parse(writeStdout.mock.calls[0]![0]));
-    expect(document.spec.inferenceProviders[0]).toMatchObject({ serving: f.observed.serving });
+    const yaml = writeStdout.mock.calls[0]![0];
+    expect(yaml).not.toContain(readFailureCanary);
+    expect(yaml).not.toContain("NEMOCLAW_VLLM_LOCAL_TOKEN");
+    expect(yaml).not.toContain("host.openshell.internal");
+    const document = validateNemoClawConfig(YAML.parse(yaml));
+    expect(document.spec.inferenceProviders).toEqual([
+      {
+        name: "managed-vllm",
+        provider: "vllm-local",
+        api: "openai-completions",
+        serving: f.observed.serving,
+      },
+    ]);
+    expect(document.spec.sandboxes[0]!.agents).toEqual([
+      {
+        name: "primary",
+        type: "openclaw",
+        tools: { disclosure: "direct" },
+        inference: {
+          routes: [
+            {
+              name: "primary",
+              providerRef: "managed-vllm",
+              overrides: { model: f.source.model, contextWindow: 65536 },
+            },
+          ],
+        },
+      },
+    ]);
+    expect(document.spec.sandboxes[0]!.network.policy.explicit).toEqual(configuration().policy);
     expect(document.spec.sandboxes[0]!.integrations?.webSearch).toEqual({
       provider: "brave",
       agentRefs: ["primary"],
