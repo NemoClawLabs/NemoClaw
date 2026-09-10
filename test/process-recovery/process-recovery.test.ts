@@ -22,6 +22,9 @@ const { createProbeTimingRecorder } = requireSource(
 const forwardService = requireSource(
   "../../src/lib/adapters/openshell/forward-service.ts",
 ) as typeof import("../../src/lib/adapters/openshell/forward-service.js");
+const openshellResolve = requireSource(
+  "../../src/lib/adapters/openshell/resolve.ts",
+) as typeof import("../../src/lib/adapters/openshell/resolve.js");
 
 function checkAndRecoverSandboxProcesses(
   sandboxName: string,
@@ -649,6 +652,9 @@ hermes-box  127.0.0.1  18789  12345  running`;
     });
     vi.spyOn(forwardHealth, "isLocalForwardReachable").mockReturnValue(true);
     vi.spyOn(forwardService, "isForwardServiceListenerOwner").mockReturnValue(true);
+    vi.spyOn(forwardService, "localListenerPids").mockReturnValue(["12345"]);
+    vi.spyOn(forwardService, "isListenerProcessExecutable").mockReturnValue(true);
+    vi.spyOn(openshellResolve, "resolveOpenshell").mockReturnValue("/usr/local/bin/openshell");
     vi.spyOn(openshellRuntime, "captureOpenshell").mockReturnValue({
       status: 0,
       output: `SANDBOX  BIND  PORT  PID  STATUS\nhermes-box  127.0.0.1  18789  12345  running`,
@@ -700,6 +706,9 @@ hermes-box  127.0.0.1  18789  12345  running`;
     });
     vi.spyOn(forwardHealth, "isLocalForwardReachable").mockReturnValue(true);
     vi.spyOn(forwardService, "isForwardServiceListenerOwner").mockReturnValue(true);
+    vi.spyOn(forwardService, "localListenerPids").mockReturnValue(["12345"]);
+    vi.spyOn(forwardService, "isListenerProcessExecutable").mockReturnValue(true);
+    vi.spyOn(openshellResolve, "resolveOpenshell").mockReturnValue("/usr/local/bin/openshell");
     vi.spyOn(openshellRuntime, "captureOpenshell").mockReturnValue({
       status: 0,
       output: `SANDBOX  BIND  PORT  PID  STATUS\nbeta  127.0.0.1  18789  12345  running`,
@@ -852,5 +861,68 @@ hermes-box  127.0.0.1  18789  12345  running`;
     const errorOutput = errorSpy.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
     expect(errorOutput).toContain("python3: validator crashed: ImportError: no module named foo");
     expect(errorOutput).toMatch(/Secret-boundary check did not complete cleanly.*hermes-box/);
+  });
+});
+
+describe("recover with a dashboard port held by a listener the sandbox does not own (#11149)", () => {
+  it("reports the occupied port, withholds forward recovery and never relaunches", async () => {
+    const openshellRuntime = requireSource("../../src/lib/adapters/openshell/runtime.js");
+    const agentRuntime = requireSource("../../src/lib/agent/runtime.js");
+    const registry = requireSource("../../src/lib/state/registry.js");
+    const forwardHealth = requireSource("../../src/lib/actions/sandbox/forward-health.js");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    vi.spyOn(agentRuntime, "getSessionAgent").mockReturnValue(null);
+    vi.spyOn(registry, "getSandbox").mockReturnValue({
+      name: "beta",
+      agent: "openclaw",
+      dashboardPort: 18789,
+    });
+    vi.spyOn(forwardHealth, "isLocalForwardReachable").mockReturnValue(true);
+    vi.spyOn(forwardService, "isForwardServiceListenerOwner").mockReturnValue(false);
+    const launch = vi.spyOn(forwardService, "launchForwardService");
+    const forwardList = vi.spyOn(openshellRuntime, "captureOpenshell").mockReturnValue({
+      status: 0,
+      output: "SANDBOX  BIND  PORT  PID  STATUS\n",
+    });
+    const runOpenshell = vi
+      .spyOn(openshellRuntime, "runOpenshell")
+      .mockReturnValue({ status: 0 } as never);
+
+    const result = await withFakeOpenshellBinary(() =>
+      checkAndRecoverSandboxProcesses("beta", {
+        quiet: false,
+        isSandboxGatewayRunningImpl: async () => true,
+      }),
+    );
+
+    expect(result).toMatchObject({
+      checked: true,
+      wasRunning: true,
+      recovered: false,
+      forwardRecovered: false,
+      forwardRecoveryFailed: true,
+      forwardRecoveryFailureDetail: expect.stringContaining(
+        "host port 18789 is held by a listener that NemoClaw cannot attribute",
+      ),
+    });
+    expect(launch).not.toHaveBeenCalled();
+    // One classification decides; the recovery helper is not asked to classify again.
+    expect(
+      forwardList.mock.calls.filter(
+        ([rawArgs]) => Array.isArray(rawArgs) && rawArgs[0] === "forward" && rawArgs[1] === "list",
+      ),
+    ).toHaveLength(1);
+    expect(
+      runOpenshell.mock.calls.some(
+        ([rawArgs]) => Array.isArray(rawArgs) && rawArgs[0] === "forward",
+      ),
+    ).toBe(false);
+    const output = logSpy.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
+    expect(output).not.toContain("missing or dead");
+    expect(output).toContain("held by a listener NemoClaw does not own");
+    const errors = errorSpy.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
+    expect(errors).toContain("Host port 18789 for 'beta' is held by a listener");
   });
 });

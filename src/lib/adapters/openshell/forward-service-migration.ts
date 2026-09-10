@@ -7,24 +7,42 @@ const RELEASE_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
 const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
 
-function legacyForwardPorts(output: string | null | undefined, sandboxName: string): number[] {
+function legacyForwardRows(output: string | null | undefined, sandboxName: string): string[][] {
   if (!output) return [];
   return output
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "")
     .split("\n")
     .map((line) => line.trim().split(/\s+/u))
-    .filter((columns) => columns[0] === sandboxName)
+    .filter((columns) => columns[0] === sandboxName);
+}
+
+function legacyForwardPorts(output: string | null | undefined, sandboxName: string): number[] {
+  return legacyForwardRows(output, sandboxName)
     .map((columns) => Number(columns[2]))
     .filter((port) => Number.isInteger(port));
 }
 
-/** Identify an exact sandbox+port entry in OpenShell's legacy forward registry. */
-export function isLegacySandboxForwardListed(
+export type LegacySandboxForwardRow = {
+  /** PID column, or `null` when it is unparseable. */
+  pid: number | null;
+  /** STATUS column as OpenShell prints it, for example `running` or `dead`. */
+  status: string;
+};
+
+/**
+ * The exact sandbox+port entry in OpenShell's legacy forward registry, or
+ * `undefined` when no such row is listed. One lookup answers "listed", "which
+ * process", and "does OpenShell still consider it running".
+ */
+export function legacySandboxForwardRow(
   output: string | null | undefined,
   sandboxName: string,
   port: number,
-): boolean {
-  return legacyForwardPorts(output, sandboxName).includes(port);
+): LegacySandboxForwardRow | undefined {
+  const row = legacyForwardRows(output, sandboxName).find((columns) => Number(columns[2]) === port);
+  if (!row) return undefined;
+  const pid = Number(row[3]);
+  return { pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null, status: row[4] ?? "" };
 }
 
 export interface LegacyForwardMigrationDeps {
