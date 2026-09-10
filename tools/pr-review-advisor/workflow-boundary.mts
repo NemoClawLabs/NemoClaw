@@ -189,5 +189,21 @@ export function validatePrReviewAdvisorWorkflow(workflowPath = DEFAULT_WORKFLOW_
   ) {
     errors.push("Unified advisor specialist artifacts must be unique per rerun attempt");
   }
+  const runtimeInstall = (advisor.jobs?.["build-advisor-runtime"]?.steps ?? []).find(
+    (step) => step.name === "Install locked runtime",
+  );
+  const runtimeInstallScript = String(runtimeInstall?.run ?? "");
+  const pinnedPackageInstall =
+    'bash "$ADVISOR_DIR/.github/actions/ci-install-pinned-ubuntu-packages.sh" "fd-find=${FD_FIND_VERSION}" "ripgrep=${RIPGREP_VERSION}"';
+  if (
+    !runtimeInstallScript.includes(pinnedPackageInstall) ||
+    runtimeInstallScript.includes("apt-get") ||
+    runtimeInstallScript.includes("UBUNTU_APT_SOURCES") ||
+    runtimeInstallScript.includes("APT_SOURCE_OPTIONS")
+  ) {
+    errors.push(
+      "Unified advisor runtime package install must delegate to the shared pinned-package helper",
+    );
+  }
   return errors;
 }

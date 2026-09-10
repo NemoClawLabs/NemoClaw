@@ -91,6 +91,18 @@ it.each([
     "needs.require-green-checks.outputs.base_sha || ''",
     "Unified advisor must prepare the PR revision from the successful checks run",
   ],
+  [
+    "pinned package helper",
+    'bash "$ADVISOR_DIR/.github/actions/ci-install-pinned-ubuntu-packages.sh"',
+    'bash "/bin/true"',
+    "Unified advisor runtime package install must delegate to the shared pinned-package helper",
+  ],
+  [
+    "direct apt bypass",
+    'bash "$ADVISOR_DIR/.github/actions/ci-install-pinned-ubuntu-packages.sh"',
+    'sudo apt-get update\n          bash "$ADVISOR_DIR/.github/actions/ci-install-pinned-ubuntu-packages.sh"',
+    "Unified advisor runtime package install must delegate to the shared pinned-package helper",
+  ],
 ])("rejects an unsafe Advisor %s mutation", (_case, before, after, error) => {
   const directory = mkdtempSync(join(tmpdir(), "nemoclaw-pr-review-advisor-"));
   const advisorPath = join(directory, "advisor.yaml");

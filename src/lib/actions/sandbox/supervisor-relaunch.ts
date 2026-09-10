@@ -217,9 +217,6 @@ export function relaunchManagedSupervisorSession(
   if (!entry) return null;
   const driver = entry.openshellDriver?.trim().toLowerCase() ?? null;
   if (!usesLegacyManagedGatewayRecovery(entry)) return null;
-  const startupCommand = reconstructSupervisorLaunchCommand(sandboxName, entry, quiet, deps);
-  if (startupCommand === null) return null;
-
   const resolveContainer = deps.resolveContainer ?? resolveDirectSandboxContainer;
   const inspect = deps.inspectContainer ?? inspectContainer;
   const confirmMissingSupervisor = deps.confirmMissingSupervisor;
@@ -235,6 +232,11 @@ export function relaunchManagedSupervisorSession(
     deps.commandExecutor ?? createCliOpenShellSandboxCommandExecutor({ hostCwd: REPOSITORY_ROOT });
   let pendingStateBackupPath: string | null = null;
   try {
+    // Reconstruction re-reads the operator's environment, so a runtime env
+    // value that no longer validates must degrade to "cannot relaunch" like
+    // every other refusal here, not escape as an unhandled error (#11161).
+    const startupCommand = reconstructSupervisorLaunchCommand(sandboxName, entry, quiet, deps);
+    if (startupCommand === null) return null;
     const containerId = resolveContainer(sandboxName, driver);
     const sleep =
       deps.sleep ??

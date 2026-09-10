@@ -598,32 +598,143 @@ describe("pull request and main workflow contracts", () => {
       "Advisor runtime",
       requiredWorkflowStep(advisorWorkflow.jobs["build-advisor-runtime"], "Install locked runtime"),
     ],
-  ])("refreshes only Ubuntu package metadata for %s", (_name, installStep) => {
-    const temp = mkdtempSync(join(tmpdir(), "nemoclaw-ubuntu-apt-sources-"));
+  ])(
+    "uses the configured ubuntu.sources file without source fragments for %s",
+    (_name, installStep) => {
+      // Both callers delegate source selection to the shared installer, which
+      // selects /etc/apt/sources.list.d/ubuntu.sources and disables source
+      // fragments before either updating metadata or installing packages.
+      expect(installStep.run).toContain("ci-install-pinned-ubuntu-packages.sh");
+      expect(installStep.run).not.toContain("apt-get update");
+    },
+  );
+
+  // source-shape-contract: security -- The trusted CLI shard checkout must include the helper invoked by the base-controlled composite action
+  it("limits CLI shard package installation to the configured ubuntu.sources file", () => {
+    const trustedCheckout = requiredWorkflowStep(
+      prWorkflow.jobs["cli-test-shards"],
+      "Checkout trusted CI actions",
+    );
+    expect(trustedCheckout.uses).toBe(trustedCheckoutAction);
+    expect(trustedCheckout.with).toMatchObject({
+      ref: "${{ github.event.pull_request.base.sha }}",
+      path: ".trusted-ci-actions",
+    });
+    expect(String(trustedCheckout.with?.["sparse-checkout"])).toContain(
+      ".github/actions/ci-install-pinned-ubuntu-packages.sh",
+    );
+
+    const temp = mkdtempSync(join(tmpdir(), "nemoclaw-cli-shard-apt-"));
     const fakeBin = join(temp, "bin");
-    const aptArgs = join(temp, "apt-args");
+    const actionPath = join(temp, "actions", "ci-cli-coverage-shard");
+    const aptTrace = join(temp, "apt-trace");
+    const binaryTrace = join(temp, "binary-trace");
+    const runnerTemp = join(temp, "runner");
+    const ubuntuSources = join(temp, "ubuntu.sources");
     mkdirSync(fakeBin);
+    mkdirSync(actionPath, { recursive: true });
+    mkdirSync(runnerTemp, { mode: 0o700 });
+    const packageInstaller = readFileSync(
+      join(process.cwd(), ".github/actions/ci-install-pinned-ubuntu-packages.sh"),
+      "utf8",
+    ).replace(
+      'UBUNTU_APT_SOURCES="/etc/apt/sources.list.d/ubuntu.sources"',
+      `UBUNTU_APT_SOURCES=${JSON.stringify(ubuntuSources)}`,
+    );
+    writeFileSync(
+      join(actionPath, "..", "ci-install-pinned-ubuntu-packages.sh"),
+      packageInstaller,
+      { mode: 0o755 },
+    );
+    writeFileSync(ubuntuSources, "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\n");
     writeFileSync(
       join(fakeBin, "sudo"),
-      '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$APT_ARGS"\nexit 86\n',
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        'printf "%s\\n" "$*" >> "$APT_TRACE"',
+        'if [ "${1:-}" = "apt-get" ] && [ "${FAIL_APT_INSTALL:-0}" = "1" ] && [[ " $* " == *" install "* ]]; then',
+        "  exit 42",
+        "fi",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(join(fakeBin, "stat"), '#!/usr/bin/env bash\nprintf "700\\n"\n', {
+      mode: 0o755,
+    });
+    writeFileSync(
+      join(fakeBin, "dpkg-query"),
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        'case "${@: -1}" in',
+        '  fd-find) printf "9.0.0-1" ;;',
+        '  ripgrep) printf "14.1.0-1" ;;',
+        "  *) exit 1 ;;",
+        "esac",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(fakeBin, "fdfind"),
+      '#!/usr/bin/env bash\nprintf "fdfind\\n" >> "$BINARY_TRACE"\nprintf "fdfind 9.0.0\\n"\n',
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(fakeBin, "rg"),
+      '#!/usr/bin/env bash\nprintf "rg\\n" >> "$BINARY_TRACE"\nprintf "ripgrep 14.1.0\\n"\n',
       { mode: 0o755 },
     );
 
     try {
-      const result = runWorkflowShellStep(installStep, {
-        APT_ARGS: aptArgs,
-        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
-      });
-      expect(result.status).toBe(86);
-      expect(readFileSync(aptArgs, "utf8").trim().split("\n")).toEqual([
-        "apt-get",
-        "update",
-        "-qq",
-        "-o",
-        "Dir::Etc::sourcelist=sources.list.d/ubuntu.sources",
-        "-o",
-        "Dir::Etc::sourceparts=-",
+      const installStep = requiredStep(
+        sharedActions.cliCoverageShard,
+        "Install pinned Pi search tools",
+      );
+      const runInstall = (extraEnv: Record<string, string> = {}) =>
+        runWorkflowShellStep(installStep, {
+          APT_TRACE: aptTrace,
+          BINARY_TRACE: binaryTrace,
+          GITHUB_ACTION_PATH: actionPath,
+          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          RUNNER_TEMP: runnerTemp,
+          ...extraEnv,
+        });
+      const result = runInstall();
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(aptTrace, "utf8").trim().split("\n")).toEqual([
+        `chmod o+x ${runnerTemp}`,
+        `install -d -m 0755 ${runnerTemp}/nemoclaw-apt-lists`,
+        `install -d -o _apt -g root -m 0700 ${runnerTemp}/nemoclaw-apt-lists/partial`,
+        `apt-get -o Dir::Etc::sourcelist=${ubuntuSources} -o Dir::Etc::sourceparts=- -o Dir::State::lists=${runnerTemp}/nemoclaw-apt-lists update -qq`,
+        `apt-get -o Dir::Etc::sourcelist=${ubuntuSources} -o Dir::Etc::sourceparts=- -o Dir::State::lists=${runnerTemp}/nemoclaw-apt-lists install -y --no-install-recommends fd-find=9.0.0-1 ripgrep=14.1.0-1`,
+        `chmod 700 ${runnerTemp}`,
       ]);
+      expect(readFileSync(binaryTrace, "utf8").trim().split("\n")).toEqual(["fdfind", "rg"]);
+
+      rmSync(ubuntuSources);
+      rmSync(aptTrace);
+      rmSync(binaryTrace);
+      const missingSourceResult = runInstall();
+      expect(missingSourceResult.status).not.toBe(0);
+      expect(missingSourceResult.stdout).toContain("Configured APT source list is unavailable");
+      expect(existsSync(aptTrace)).toBe(false);
+      expect(existsSync(binaryTrace)).toBe(false);
+
+      writeFileSync(ubuntuSources, "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\n");
+      const unpinnedPackageResult = runInstall({ FD_FIND_VERSION: "" });
+      expect(unpinnedPackageResult.status).not.toBe(0);
+      expect(unpinnedPackageResult.stderr).toContain(
+        "Package specification must use package=version",
+      );
+      expect(existsSync(aptTrace)).toBe(false);
+      expect(existsSync(binaryTrace)).toBe(false);
+
+      const unavailablePackageResult = runInstall({ FAIL_APT_INSTALL: "1" });
+      expect(unavailablePackageResult.status).not.toBe(0);
+      expect(readFileSync(aptTrace, "utf8").trim().split("\n")).toHaveLength(6);
+      expect(existsSync(binaryTrace)).toBe(false);
     } finally {
       rmSync(temp, { force: true, recursive: true });
     }
