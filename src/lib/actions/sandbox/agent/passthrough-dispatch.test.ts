@@ -7,18 +7,23 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   type AgentDispatchChild,
-  AGENT_DISPATCH_DEADLINE_BUFFER_SECONDS,
-  agentDispatchDeadlineSeconds,
   agentDispatchStdio,
   isSilentAgentDispatch,
   isTimedOutAgentDispatch,
-  replaceRequestedAgentTimeoutSeconds,
-  requestedAgentTimeoutSeconds,
   runAgentDispatch,
   SILENT_AGENT_DISPATCH_EXIT_CODE,
   TIMED_OUT_AGENT_TURN_EXIT_CODE,
 } from "./passthrough-dispatch";
 import { buildOpenshellExecArgs, computeExitCode, type SandboxExecSignalSource } from "../exec";
+import {
+  canCloseAgentStdin,
+  hasOpenClawAgentSelector,
+  requestsOpenClawJsonOutput,
+  AGENT_DISPATCH_DEADLINE_BUFFER_SECONDS,
+  agentDispatchDeadlineSeconds,
+  replaceRequestedAgentTimeoutSeconds,
+  requestedAgentTimeoutSeconds,
+} from "../../../domain/sandbox/openclaw-agent-args";
 
 function dispatchHarness() {
   const childEvents = new EventEmitter();
@@ -46,6 +51,31 @@ function dispatchHarness() {
 }
 
 describe("runAgentDispatch", () => {
+  it.each([
+    { mode: "headless", stdinIsTty: false, forwarded: [["SIGINT"]] },
+    { mode: "terminal", stdinIsTty: true, forwarded: [] },
+  ])(
+    "handles SIGINT for a $mode caller without duplicate delivery (#11371)",
+    async ({ stdinIsTty, forwarded }) => {
+      const harness = dispatchHarness();
+      const pending = runAgentDispatch(
+        "openshell",
+        ["sandbox", "exec"],
+        { stdinIsTty },
+        {
+          signalSource: harness.signalSource,
+          spawnChild: () => harness.child,
+        },
+      );
+      try {
+        harness.signalEvents.emit("SIGINT");
+        expect(vi.mocked(harness.child.kill).mock.calls).toEqual(forwarded);
+      } finally {
+        harness.childEvents.emit("close", null, "SIGINT");
+        expect(await pending).toMatchObject({ status: null, signal: "SIGINT" });
+      }
+    },
+  );
   it("forwards host SIGTERM to OpenShell and captures output before signal exit (#8723)", async () => {
     const harness = dispatchHarness();
     const pending = runAgentDispatch(
@@ -206,11 +236,63 @@ describe("agentDispatchStdio", () => {
     expect(agentDispatchStdio(false)).toEqual(["inherit", "pipe", "pipe"]);
   });
 
+  it("closes an idle input pipe when stdin is disabled (#11371)", () => {
+    expect(agentDispatchStdio(false, false)).toEqual(["ignore", "pipe", "pipe"]);
+  });
+
   it("captures both output streams in either stdin posture", () => {
     expect([agentDispatchStdio(true).slice(1), agentDispatchStdio(false).slice(1)]).toEqual([
       ["pipe", "pipe"],
       ["pipe", "pipe"],
     ]);
+  });
+});
+
+describe("canCloseAgentStdin", () => {
+  it.each([
+    ["--agent", "main", "-m", "ping"],
+    ["--json", "--agent=main", "--message", "ping"],
+    ["--deliver", "--session-key", "main", "--message=ping"],
+    ["--timeout", "30", "-mping"],
+    ["-m", "--json"],
+    ["--message="],
+    ["--message"],
+    ["--message-file"],
+    ["--message-file="],
+    ["--message-file", " "],
+    ["--message-file", "/dev/stdin", "-m", "conflicting message"],
+    ["--verbose", "off", "--channel", "slack", "-m", "ping"],
+    ["--local", "--reply-to", "#reports", "--reply-account", "work", "-m", "ping"],
+    ["-aops", "--json", "-mping"],
+    ["--profile", "work", "--log-level=debug", "--no-color", "-m", "ping"],
+    ["--dev", "--container", "agent-tools", "--message", "ping"],
+  ])("recognizes explicit message options %j", (...args) => {
+    expect(canCloseAgentStdin(["openclaw", "agent", ...args])).toBe(true);
+  });
+
+  it.each([
+    ["--agent", "main"],
+    ["--agent", "--message", "ping"],
+    ["--", "-m", "ping"],
+    ["--unknown", "-m", "ping"],
+    ["--reply-to", "-m", "payload"],
+    ["-t+15555550123", "--message-file=/sandbox/task.md"],
+    ["--verbose=on", "--channel=slack", "--message-file", "/sandbox/task.md"],
+    ["--message-file", "/dev/stdin", "--message-file=/sandbox/task.md"],
+    ["--message-file", "/dev/stdin"],
+    ["--message-file", "/sandbox/message-alias"],
+    ["--message-file", "relative-message-path"],
+    ["--message-file=/dev/fd/0"],
+    ["--message-file", " /proc/self/fd/0 "],
+    ["--message-file", "/proc/thread-self/fd/0"],
+    ["--message-file", "/dev/./stdin"],
+    ["--message-file", "/sandbox/task.md", "--message-file=/dev/stdin"],
+  ])("preserves stdin when argv does not establish a message %j", (...args) => {
+    expect(canCloseAgentStdin(["openclaw", "agent", ...args])).toBe(false);
+  });
+
+  it("leaves another agent's stdin unchanged", () => {
+    expect(canCloseAgentStdin(["dcode", "-m", "ping"])).toBe(false);
   });
 });
 
@@ -222,6 +304,35 @@ describe("SILENT_AGENT_DISPATCH_EXIT_CODE", () => {
 
 describe("requestedAgentTimeoutSeconds", () => {
   const agent = (...args: string[]) => ["openclaw", "agent", ...args];
+
+  it("uses and updates the last timeout without changing earlier argv (#11371)", () => {
+    const command = agent("--timeout", "30", "--verbose", "off", "--timeout=90", "-m", "ping");
+    expect(requestedAgentTimeoutSeconds(command)).toBe(90);
+    expect(replaceRequestedAgentTimeoutSeconds(command, 45)).toEqual(
+      agent("--timeout", "30", "--verbose", "off", "--timeout=45", "-m", "ping"),
+    );
+    expect(
+      agentDispatchDeadlineSeconds(agent("--timeout", "30", "--timeout", "0")),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ["--verbose", "off"],
+    ["--channel", "slack"],
+    ["--reply-to", "#reports"],
+    ["--reply-account", "work"],
+    ["--local"],
+    ["--message-file", "/sandbox/task.md"],
+    ["-t+15555550123"],
+    ["-mping"],
+    ["--profile", "work", "--log-level", "debug", "--no-color"],
+  ])("preserves the deadline after agent options %j (#11371)", (...prefix) => {
+    const command = agent(...prefix, "--timeout=30");
+    expect(requestedAgentTimeoutSeconds(command)).toBe(30);
+    expect(replaceRequestedAgentTimeoutSeconds(command, 12)).toEqual(
+      agent(...prefix, "--timeout=12"),
+    );
+  });
 
   it("rejects timeout flags outside the exact OpenClaw agent prefix (#8723)", () => {
     expect(requestedAgentTimeoutSeconds(["other", "agent", "--timeout", "30"])).toBeNull();
@@ -283,6 +394,27 @@ describe("requestedAgentTimeoutSeconds", () => {
 
   it("refuses a missing deadline value (#8723)", () => {
     expect(requestedAgentTimeoutSeconds(agent("--timeout"))).toBeNull();
+  });
+});
+
+describe("shared agent option interpretation", () => {
+  it.each([["-t", "+15555550123"], ["-t+15555550123"], ["--agent=main"]])(
+    "recognizes the target selector %j",
+    (...args) => {
+      expect(hasOpenClawAgentSelector(["openclaw", "agent", ...args, "-m", "ping"])).toBe(true);
+    },
+  );
+
+  it.each(["--agent", "--to", "--session-key", "--session-id"])(
+    "does not treat the message value %s as a selector",
+    (value) => {
+      expect(hasOpenClawAgentSelector(["openclaw", "agent", "-m", value])).toBe(false);
+    },
+  );
+
+  it("honors the last JSON switch", () => {
+    expect(requestsOpenClawJsonOutput(["openclaw", "agent", "--json", "--json=false"])).toBe(false);
+    expect(requestsOpenClawJsonOutput(["openclaw", "agent", "--json=false", "--json"])).toBe(true);
   });
 });
 

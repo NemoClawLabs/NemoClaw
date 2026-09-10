@@ -3,7 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { type AgentPassthroughDeps, runAgentPassthrough } from "./passthrough";
-import { requestedAgentTimeoutSeconds } from "./passthrough-dispatch";
+import { requestedAgentTimeoutSeconds } from "../../../domain/sandbox/openclaw-agent-args";
 import { runOllamaRestartRecovery } from "./passthrough-ollama-recovery";
 
 function makeProcMock() {
@@ -389,7 +389,10 @@ describe("agent passthrough Ollama recovery ordering", () => {
     expect(diagnostics.join("")).toContain("failed unexpectedly");
   });
 
-  it("does not dispatch after Ollama recovery receives SIGTERM", async () => {
+  it.each([
+    { signal: "SIGTERM" as const, code: 143 },
+    { signal: "SIGINT" as const, code: 130 },
+  ])("does not dispatch after Ollama recovery receives $signal", async ({ signal, code }) => {
     const events: string[] = [];
     const route = {
       provider: "ollama-local",
@@ -399,7 +402,7 @@ describe("agent passthrough Ollama recovery ordering", () => {
     const deps = makePassthroughDeps(route, events);
     const runRecovery = vi.fn(async () => {
       events.push("recovery-cancelled");
-      return "SIGTERM" as const;
+      return signal;
     });
 
     await expect(
@@ -408,7 +411,7 @@ describe("agent passthrough Ollama recovery ordering", () => {
         { extraArgs: ["--agent", "main", "-m", "ping"] },
         { ...deps, runOllamaRestartRecovery: runRecovery },
       ),
-    ).rejects.toThrow("__exit:143");
+    ).rejects.toThrow(`__exit:${code}`);
 
     expect(events).toEqual(["recovery-cancelled"]);
   });

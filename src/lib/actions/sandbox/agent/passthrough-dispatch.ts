@@ -36,8 +36,10 @@
 //      result is a live terminal on fd 0 handed to a dispatch whose stdout
 //      and stderr are pipes and whose argv says `--no-tty`.
 //    - Source boundary: NemoClaw owns which fds it hands to OpenShell.
-//      Forwarding a real pipe stays supported so `printf ... | nemoclaw
-//      <name> agent` keeps working; only an interactive terminal is withheld.
+//      When the message is in argv, fd 0 is closed: OpenShell reads piped
+//      stdin to EOF before dispatch, so an idle pipe from automation can
+//      otherwise delay a ready sandbox indefinitely (#11371). Calls without
+//      an explicit message retain the existing piped-input behavior.
 //    - Removal condition: drop the TTY carve-out if `openclaw agent` gains a
 //      documented interactive stdin mode reachable through this wrapper.
 //
@@ -127,6 +129,7 @@ export type AgentDispatchRunner = (
   options?: {
     maxBufferBytes?: number;
     stdinIsTty?: boolean;
+    stdin?: boolean;
   },
 ) => Promise<AgentDispatchResult>;
 
@@ -175,6 +178,7 @@ export async function runAgentDispatch(
   options: {
     maxBufferBytes?: number;
     stdinIsTty?: boolean;
+    stdin?: boolean;
   } = {},
   deps: AgentDispatchRunDeps = {},
 ): Promise<AgentDispatchResult> {
@@ -183,17 +187,14 @@ export async function runAgentDispatch(
   const captureBudget: AgentDispatchCaptureBudget = { bytes: 0, overflowed: false };
   let overflowError: Error | undefined;
   const maxBufferBytes = options.maxBufferBytes ?? DEFAULT_AGENT_DISPATCH_MAX_BUFFER_BYTES;
+  const stdinIsTty = options.stdinIsTty ?? isStdinTty();
   const spawnChild = deps.spawnChild ?? defaultAgentDispatchSpawner;
   const result = await runSandboxExecChild(
     binary,
     args,
-    { tty: false },
+    { tty: false, forwardSigint: !stdinIsTty },
     (runBinary, runArgs) => {
-      const child = spawnChild(
-        runBinary,
-        runArgs,
-        agentDispatchStdio(options.stdinIsTty ?? isStdinTty()),
-      );
+      const child = spawnChild(runBinary, runArgs, agentDispatchStdio(stdinIsTty, options.stdin));
       const setOverflowError = (error: Error) => {
         overflowError ??= error;
       };
@@ -232,11 +233,11 @@ export async function runAgentDispatch(
 
 /**
  * Stdio for a non-interactive agent dispatch. An interactive terminal is
- * withheld from fd 0; a genuine pipe or redirect is still forwarded so
- * scripted stdin keeps working.
+ * withheld from fd 0. Message-bearing invocations also withhold idle pipes;
+ * other calls preserve redirected input.
  */
-export function agentDispatchStdio(stdinIsTty: boolean = isStdinTty()): StdioOptions {
-  return [stdinIsTty ? "ignore" : "inherit", "pipe", "pipe"];
+export function agentDispatchStdio(stdinIsTty: boolean = isStdinTty(), stdin = true): StdioOptions {
+  return [stdinIsTty || !stdin ? "ignore" : "inherit", "pipe", "pipe"];
 }
 
 /**
@@ -279,137 +280,4 @@ const OPENCLAW_AGENT_TIMEOUT_PATTERN =
  */
 export function isTimedOutAgentDispatch(stdout: string, stderr: string): boolean {
   return OPENCLAW_AGENT_TIMEOUT_PATTERN.test(stdout) || OPENCLAW_AGENT_TIMEOUT_PATTERN.test(stderr);
-}
-
-/** Documented `openclaw agent` options that consume the next argv element. */
-export const OPENCLAW_AGENT_VALUE_FLAGS = new Set([
-  "-a",
-  "--agent",
-  "-m",
-  "--message",
-  "--model",
-  "--provider",
-  "--reply-channel",
-  "--session-id",
-  "--session-key",
-  "--thinking",
-  "--timeout",
-  "--to",
-]);
-
-/** Documented `openclaw agent` options that consume no argv element. */
-export const OPENCLAW_AGENT_BOOLEAN_FLAGS = new Set(["--deliver"]);
-
-/**
- * Extra seconds added to a requested `--timeout` before the host transport
- * stops waiting.
- *
- * The in-sandbox turn owns the deadline and answers first while it can still
- * write to stderr: it reports the timeout, names the config key, and exits.
- * Only a turn that stops answering reaches the host bound, so the extra seconds
- * must outlast an ordinary late finish.
- *
- * This value is a choice, not a derivation. #8723 timed five aborted runs
- * finishing 0.1 s to 20.8 s after their deadline, and four further aborted runs
- * recorded no finish at all, so no measurement establishes an upper bound.
- * Below roughly five seconds the host truncates the turn's own timeout report;
- * above roughly a minute the host bound no longer catches a turn that stops
- * answering. Thirty is inside that range and above every post-deadline finish
- * #8723 recorded. Choose another value inside that range if a slower model or a
- * busier host requires it.
- */
-export const AGENT_DISPATCH_DEADLINE_BUFFER_SECONDS = 30;
-
-type RequestedAgentTimeout = {
-  seconds: number;
-  argumentIndex: number;
-  inline: boolean;
-};
-
-function findRequestedAgentTimeout(argv: readonly string[]): RequestedAgentTimeout | null {
-  if (argv[0] !== "openclaw" || argv[1] !== "agent") return null;
-  for (let index = 2; index < argv.length; index += 1) {
-    const arg = argv[index] as string;
-    if (arg === "--") return null;
-    if (arg === "--timeout") {
-      const seconds = parseDeadlineSeconds(argv[index + 1]);
-      return seconds === null ? null : { seconds, argumentIndex: index, inline: false };
-    }
-    if (arg.startsWith("--timeout=")) {
-      const seconds = parseDeadlineSeconds(arg.slice("--timeout=".length));
-      return seconds === null ? null : { seconds, argumentIndex: index, inline: true };
-    }
-    if (OPENCLAW_AGENT_VALUE_FLAGS.has(arg)) {
-      index += 1;
-      continue;
-    }
-    const equalsIndex = arg.indexOf("=");
-    if (
-      equalsIndex > 0 &&
-      arg.startsWith("--") &&
-      OPENCLAW_AGENT_VALUE_FLAGS.has(arg.slice(0, equalsIndex))
-    ) {
-      continue;
-    }
-    if (arg === "--json" || arg.startsWith("--json=") || OPENCLAW_AGENT_BOOLEAN_FLAGS.has(arg)) {
-      continue;
-    }
-    return null;
-  }
-  return null;
-}
-
-/**
- * The `--timeout` an `openclaw agent` argv requests, or null when the argv
- * requests none.
- *
- * Mirrors the documented flag grammar only far enough to read one value.
- * Anything unrecognized, malformed, or past a `--` terminator returns null so
- * the host keeps the wait unbounded rather than shortening a turn without
- * evidence. `--timeout 0` disables the deadline upstream and returns null here
- * for the same reason.
- */
-export function requestedAgentTimeoutSeconds(argv: readonly string[]): number | null {
-  return findRequestedAgentTimeout(argv)?.seconds ?? null;
-}
-
-/** Replace a valid agent timeout while preserving its separated or equals form. */
-export function replaceRequestedAgentTimeoutSeconds(
-  argv: readonly string[],
-  timeoutSeconds: number,
-): readonly string[] {
-  const requested = findRequestedAgentTimeout(argv);
-  if (requested === null) return argv;
-  const replacement = String(Math.max(1, Math.floor(timeoutSeconds)));
-  const command = [...argv];
-  if (requested.inline) {
-    command[requested.argumentIndex] = `--timeout=${replacement}`;
-  } else {
-    command[requested.argumentIndex + 1] = replacement;
-  }
-  return command;
-}
-
-function parseDeadlineSeconds(raw: string | undefined): number | null {
-  if (raw === undefined || !/^\d+$/.test(raw)) return null;
-  const seconds = Number(raw);
-  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : null;
-}
-
-/**
- * The host transport deadline for an `openclaw agent` argv, or undefined when
- * the argv requested none. Undefined leaves `openshell sandbox exec` on its own
- * default, which is no timeout.
- *
- * A requested deadline near the safe-integer ceiling stays unbounded rather
- * than becoming a bound the host cannot represent. Past that ceiling the buffer
- * addition rounds, so the wait would silently differ from the number written to
- * the command line. That matches how this module treats every other value it
- * cannot read.
- */
-export function agentDispatchDeadlineSeconds(argv: readonly string[]): number | undefined {
-  const requested = requestedAgentTimeoutSeconds(argv);
-  if (requested === null) return undefined;
-  const deadline = requested + AGENT_DISPATCH_DEADLINE_BUFFER_SECONDS;
-  return Number.isSafeInteger(deadline) ? deadline : undefined;
 }
