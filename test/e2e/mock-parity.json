@@ -122,6 +122,7 @@
     {
       "live": "test/e2e/live/hermes-gpu-startup.test.ts",
       "liveSources": [
+        "test/e2e/live/hermes-gpu-startup-integrity.ts",
         "test/e2e/live/hermes-gpu-startup-fallback.ts",
         "test/e2e/live/hermes-gpu-startup-proof.ts"
       ],
@@ -278,6 +279,7 @@
     },
     {
       "live": "test/e2e/live/openshell-credential-generation-window.test.ts",
+      "liveSources": ["test/e2e/live/openshell-credential-generation-window.ts"],
       "fast": [
         "test/credentials/openshell-credential-generation-window.test.ts",
         "test/mcp/mcp-artifact-secret-scan.test.ts",
@@ -615,6 +617,7 @@
         "test/e2e/live/mcp-bridge-sandbox.ts",
         "test/e2e/live/mcp-bridge-tool-discovery.ts",
         "test/e2e/live/mcp-bridge-trusted-private.ts",
+        "test/e2e/live/mcp-provider-rewrite-probe.ts",
         "test/e2e/live/openshell-allowed-ips-rebinding.ts",
         "test/e2e/live/openshell-exact-main-runtime-contracts.ts"
       ],
@@ -624,6 +627,8 @@
         "src/lib/actions/sandbox/mcp-bridge-adapter-teardown.test.ts",
         "src/lib/actions/sandbox/mcp-bridge-input-targets.test.ts",
         "src/lib/actions/sandbox/mcp-bridge-provider.test.ts",
+        "test/mcp/mcp-artifact-secret-scan.test.ts",
+        "test/mcp/mcp-bridge-servers.test.ts",
         "test/e2e/support/e2e-cleanup-resources.test.ts",
         "test/e2e/support/e2e-clients.test.ts",
         "test/e2e/support/e2e-redaction-entry.test.ts",

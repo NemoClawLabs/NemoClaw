@@ -1048,7 +1048,7 @@ describe("destroySandbox flow", () => {
 
     await expect(harness.destroySandbox("alpha", { yes: true })).rejects.toThrow("process.exit(1)");
 
-    expect(harness.events).toEqual(["wipe", "detach", "mcp-restore"]);
+    expect(harness.events).toEqual(["mcp-prepare", "wipe", "detach", "mcp-restore"]);
     expect(
       harness.runOpenshellSpy.mock.calls.some(
         ([args]) => Array.isArray(args) && args[0] === "sandbox" && args[1] === "delete",
@@ -1161,9 +1161,13 @@ describe("destroySandbox flow", () => {
 
     await expect(harness.destroySandbox("alpha", { yes: true })).resolves.toBeUndefined();
 
-    expect(harness.prepareMcpBridgesForDestroySpy).toHaveBeenCalledWith("alpha", {
-      force: false,
-    });
+    expect(harness.prepareMcpBridgesForDestroySpy).toHaveBeenCalledWith(
+      "alpha",
+      expect.objectContaining({
+        force: false,
+        sandbox: expect.objectContaining({ name: "alpha" }),
+      }),
+    );
     expect(harness.mcpRuntimeSelectionSpy).not.toHaveBeenCalled();
   });
 
@@ -1178,10 +1182,6 @@ describe("destroySandbox flow", () => {
 
     expect(harness.prepareMcpBridgesForAbsentSandboxDestroySpy).toHaveBeenCalledWith("alpha", {
       force: false,
-      runtimeSelection: expect.objectContaining({
-        gatewayName: "nemoclaw-19080",
-        workspace: "default",
-      }),
     });
   });
 
@@ -1340,8 +1340,8 @@ describe("destroySandbox flow", () => {
     expect(harness.cleanupGatewaySpy).not.toHaveBeenCalled();
     expect(exitSpy).toHaveBeenCalledWith(1);
     const errorOutput = harness.errorSpy.mock.calls.map((call) => String(call[0])).join("\n");
-    expect(errorOutput).toContain("MCP ownership required for exact provider cleanup");
-    expect(errorOutput).toContain("--force cannot safely discard MCP ownership");
+    expect(errorOutput).toContain("current MCP sources could not be inspected safely");
+    expect(errorOutput).toContain("--force does not bypass MCP source inspection");
     expect(errorOutput).not.toContain("re-run with --force to remove the local sandbox record");
   });
 
@@ -1444,10 +1444,6 @@ describe("destroySandbox flow", () => {
 
     expect(harness.prepareMcpBridgesForAbsentSandboxDestroySpy).toHaveBeenCalledWith("alpha", {
       force: false,
-      runtimeSelection: expect.objectContaining({
-        gatewayName: "nemoclaw-19080",
-        workspace: "default",
-      }),
     });
     expect(harness.finalizeMcpBridgesAfterSandboxDeleteSpy).toHaveBeenCalledTimes(2);
     expect(harness.removeSandboxSpy).toHaveBeenCalledWith("alpha");

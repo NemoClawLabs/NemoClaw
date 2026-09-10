@@ -33,7 +33,6 @@ import {
 import {
   type McpRebuildPreparation,
   printMcpRebuildRetryCommand,
-  restoreMcpRegistryForRebuildRetry,
 } from "./rebuild-mcp-phase";
 import { rebuildOnboardDependencies } from "./rebuild-onboard-dependencies";
 import type { RebuildRecreateJournal } from "./rebuild-recreate-journal";
@@ -348,7 +347,7 @@ export async function runRebuildRecreatePhase(input: RebuildRecreatePhaseInput):
     }
 
     registryRollback.restoreForRetry();
-    restoreMcpRegistryForRebuildRetry(recoveryRecreate, rebuildMcpEntries, sb, log);
+    log("Recreate failed: preserved source-derived MCP handoff for retry");
 
     console.error("");
     if (recoveryRecreate) {

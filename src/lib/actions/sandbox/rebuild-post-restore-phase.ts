@@ -128,7 +128,7 @@ function printHermesApiTokenChangeNotice(sandboxName: string, targetAgentName: s
 }
 
 /**
- * Repair agent state, restore MCP/forwarding, reconcile the registry, and report
+ * Repair agent state, restore MCP/forwarding, reconcile non-MCP registry state, and report
  * the final transaction result. Boundary coverage: rebuild-flow.test.ts and
  * rebuild-config-hash.test.ts cover the complete/incomplete post-restore paths;
  * rebuild-post-restore-phase.test.ts covers forwarding recovery reports.
@@ -561,11 +561,8 @@ export async function runRebuildPostRestorePhase(
     bail("OpenClaw config integrity verification failed after rebuild.");
     return;
   }
-  if (
-    targetAgentName === "hermes" &&
-    (hermesGatewayRestoreUnverified || mcpBridgeRestoreUnverified)
-  ) {
-    bail(`Hermes post-restore verification failed for '${sandboxName}'.`);
+  if (hermesGatewayRestoreUnverified || mcpBridgeRestoreUnverified) {
+    bail(`${rebuiltAgentName} post-restore verification failed for '${sandboxName}'.`);
     return;
   }
   if (preparedBackupRecovery && !postRestoreComplete) {

@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { McpBridgeEntry } from "../../state/registry";
+import type { McpSourceEntry } from "./mcp-bridge-contracts";
+import type { SandboxEntry } from "../../state/registry";
 import type { McpScrubbedAdapterEntry } from "./mcp-bridge-adapter-teardown";
 import type { McpProviderInspectionRuntimeSelection } from "./mcp-bridge-provider";
 import {
@@ -15,8 +16,8 @@ import {
 } from "./mcp-bridge-contracts";
 import {
   finalizeMcpBridgesAfterSandboxDelete as finalizeMcpBridgesAfterSandboxDeleteLifecycle,
-  prepareMcpBridgesForAbsentSandboxDestroy as prepareMcpBridgesForAbsentSandboxDestroyLifecycle,
   prepareMcpBridgesForDestroy as prepareMcpBridgesForDestroyLifecycle,
+  prepareMcpBridgesForAbsentSandboxDestroy as prepareMcpBridgesForAbsentSandboxDestroyLifecycle,
   restoreMcpBridgesAfterDestroyAbort as restoreMcpBridgesAfterDestroyAbortLifecycle,
 } from "./mcp-bridge-destroy";
 import type { McpDestroyPreparation } from "./mcp-bridge-destroy-preflight";
@@ -29,10 +30,13 @@ import {
   restoreMcpBridgesAfterRebuild as restoreMcpBridgesAfterRebuildLifecycle,
 } from "./mcp-bridge-rebuild";
 import { removeMcpBridge as removeMcpBridgeLifecycle } from "./mcp-bridge-remove";
+import { migrateMcpBridges, type McpMigrationRebuildIntent } from "./mcp-bridge-migration";
 import { renderMcpBridgeList, renderMcpBridgeStatus } from "./mcp-bridge-render";
 import { credentialResolutionWarning } from "./mcp-bridge-resolution-probe";
 import { restartMcpBridge as restartMcpBridgeLifecycle } from "./mcp-bridge-restart";
-import { getSandboxAgent, getSandboxOrThrow } from "./mcp-bridge-state";
+import { getMcpProviderInspectionRuntimeSelection } from "./mcp-bridge-provider";
+import { inspectSourceBridgeState, joinMcpEntriesToOpenShell } from "./mcp-bridge-source";
+import { getSandboxAgent, getSandboxOrThrow, resolveMcpOperationTarget } from "./mcp-bridge-state";
 import { buildJsonSummary, statusMcpBridge } from "./mcp-bridge-status";
 import { parseMcpAddArgs, parseMcpUpdateArgs } from "./mcp-bridge-validation";
 
@@ -43,12 +47,12 @@ export {
   buildHermesMcpExecArgs,
   buildHermesMcpProbeCommand,
   buildHermesMcpRegisterCommand,
-  buildOpenClawMcporterInspectCommand,
-  buildOpenClawMcporterRegisterCommand,
-  buildOpenClawMcporterRemoveCommand,
+  buildOpenClawMcpInspectCommand,
+  buildOpenClawMcpRegisterCommand,
+  buildOpenClawMcpRemoveCommand,
   DEEPAGENTS_MCP_CONFIG_PATH,
   MCPORTER_VERSION,
-  mcporterHeadersMatchExpected,
+  openClawHeadersMatchExpected,
   parseAdapterRegistrationInspection,
 } from "./mcp-bridge-adapters";
 export type {
@@ -73,7 +77,6 @@ export {
   buildMcpCredentialRevisionObservationCommand,
   detachMissingProviderReference,
 } from "./mcp-bridge-provider";
-export { prepareMcpBridgesForExecUnavailableRebuild } from "./mcp-bridge-rebuild";
 export {
   buildMcpBridgeProviderName,
   MCP_SERVER_URL_MAX_LENGTH,
@@ -88,6 +91,38 @@ export {
 export type { McpDestroyPreparation } from "./mcp-bridge-destroy-preflight";
 export type { McpRebuildPreparation };
 export { statusMcpBridge };
+
+async function inspectCurrentBridgeEntries(
+  sandboxName: string,
+  runtimeSelection?: McpProviderInspectionRuntimeSelection,
+  options: { allowLegacyHandoff?: boolean } = {},
+): Promise<{
+  entries: McpSourceEntry[];
+  runtimeSelection: McpProviderInspectionRuntimeSelection;
+}> {
+  const sandbox = getSandboxOrThrow(sandboxName);
+  const selected = runtimeSelection ?? getMcpProviderInspectionRuntimeSelection(sandbox);
+  const observed = await inspectSourceBridgeState(sandbox, selected);
+  const legacyNames = Object.keys(observed.sources.legacy).sort();
+  if (legacyNames.length > 0 && !options.allowLegacyHandoff) {
+    throw new McpBridgeError(
+      `Legacy MCP agent configuration requires explicit migration for '${legacyNames.join(", ")}'. Run \`nemoclaw ${sandboxName} mcp migrate\` to preview it.`,
+      2,
+    );
+  }
+  const bridges = options.allowLegacyHandoff
+    ? {
+        ...(await joinMcpEntriesToOpenShell(
+          sandbox,
+          observed.sources.legacy,
+          selected,
+          "inspect legacy MCP migration state",
+        )),
+        ...observed.bridges,
+      }
+    : observed.bridges;
+  return { entries: Object.values(bridges), runtimeSelection: selected };
+}
 
 export async function addMcpBridge(
   sandboxName: string,
@@ -131,6 +166,7 @@ export async function prepareMcpBridgesForDestroy(
   options: {
     force?: boolean;
     runtimeSelection?: McpProviderInspectionRuntimeSelection;
+    sandbox?: SandboxEntry;
   } = {},
 ): Promise<McpDestroyPreparation> {
   return prepareMcpBridgesForDestroyLifecycle(sandboxName, options);
@@ -154,20 +190,32 @@ export async function finalizeMcpBridgesAfterSandboxDelete(
 export async function prepareMcpBridgesForAbsentSandboxRebuild(
   sandboxName: string,
   runtimeSelection?: McpProviderInspectionRuntimeSelection,
+  entries: readonly McpSourceEntry[] = [],
 ): Promise<McpRebuildPreparation> {
-  return prepareMcpBridgesForAbsentSandboxRebuildLifecycle(sandboxName, runtimeSelection);
+  return prepareMcpBridgesForAbsentSandboxRebuildLifecycle(sandboxName, entries, runtimeSelection);
 }
 
 export async function prepareMcpBridgesForRebuild(
   sandboxName: string,
   runtimeSelection?: McpProviderInspectionRuntimeSelection,
+  entries?: readonly McpSourceEntry[],
 ): Promise<McpRebuildPreparation> {
-  return prepareMcpBridgesForRebuildLifecycle(sandboxName, runtimeSelection);
+  if (entries) {
+    return prepareMcpBridgesForRebuildLifecycle(sandboxName, entries, runtimeSelection);
+  }
+  const observed = await inspectCurrentBridgeEntries(sandboxName, runtimeSelection, {
+    allowLegacyHandoff: true,
+  });
+  return prepareMcpBridgesForRebuildLifecycle(
+    sandboxName,
+    observed.entries,
+    observed.runtimeSelection,
+  );
 }
 
 export async function reattachMcpProvidersAfterRebuildAbort(
   sandboxName: string,
-  entries: readonly McpBridgeEntry[],
+  entries: readonly McpSourceEntry[],
   scrubbedAdapterEntries: readonly McpScrubbedAdapterEntry[] = [],
   runtimeSelection?: McpProviderInspectionRuntimeSelection,
 ): Promise<void> {
@@ -181,7 +229,7 @@ export async function reattachMcpProvidersAfterRebuildAbort(
 
 export async function restoreMcpBridgesAfterRebuild(
   sandboxName: string,
-  entries: readonly McpBridgeEntry[],
+  entries: readonly McpSourceEntry[],
   runtimeSelection?: McpProviderInspectionRuntimeSelection,
 ): Promise<void> {
   return restoreMcpBridgesAfterRebuildLifecycle(sandboxName, entries, runtimeSelection);
@@ -319,17 +367,28 @@ FLAGS
   nemoclaw <name> mcp remove <server> [--force]
 
 FLAGS
-  --force  Best-effort owned cleanup; preserves registry state when residuals remain`);
+  --force  Best-effort source cleanup; preserves ambiguous providers`);
+      return;
+    case "migrate":
+      console.log(`USAGE
+  nemoclaw <name> mcp migrate [--apply] [--json]
+
+FLAGS
+  --apply  Atomically materialize legacy entries in agent-native configuration
+  --json   Emit the secret-free migration plan as JSON`);
       return;
     default:
       console.log(`USAGE
-  nemoclaw <name> mcp <add|update|list|status|restart|remove> [args...]`);
+  nemoclaw <name> mcp <add|update|list|status|restart|remove|migrate> [args...]`);
   }
 }
 
 export async function dispatchMcpBridgeCommand(
   sandboxName: string,
   actionArgs: string[],
+  dependencies: {
+    rebuildForMigration?: (sandboxName: string, intent: McpMigrationRebuildIntent) => Promise<void>;
+  } = {},
 ): Promise<void> {
   const [subcommand = "list", ...rest] = actionArgs;
   try {
@@ -365,9 +424,11 @@ export async function dispatchMcpBridgeCommand(
       case "list": {
         const { json, rest: listRest } = parseJsonFlag(rest);
         requireNoExtraArgs(listRest, "Usage: nemoclaw <sandbox> mcp list [--json]");
-        const sandbox = getSandboxOrThrow(sandboxName);
-        const agent = getSandboxAgent(sandbox);
-        const statuses = await statusMcpBridge(sandboxName);
+        const target = resolveMcpOperationTarget(sandboxName);
+        const agent = getSandboxAgent(target.sandbox);
+        const statuses = target.liveIdentity
+          ? await statusMcpBridge(sandboxName, undefined, { operationTarget: target })
+          : await statusMcpBridge(sandboxName);
         if (json)
           process.stdout.write(
             `${JSON.stringify(buildJsonSummary(sandboxName, agent, statuses), null, 2)}\n`,
@@ -386,9 +447,10 @@ export async function dispatchMcpBridgeCommand(
         if (tools && server === undefined) {
           throw new McpBridgeError("Pass one MCP server name with --tools.", 2);
         }
-        const sandbox = getSandboxOrThrow(sandboxName);
-        const agent = getSandboxAgent(sandbox);
+        const target = resolveMcpOperationTarget(sandboxName);
+        const agent = getSandboxAgent(target.sandbox);
         const statuses = await statusMcpBridge(sandboxName, server, {
+          ...(target.liveIdentity ? { operationTarget: target } : {}),
           probeCredentialResolution: probe === true || (probe !== false && !tools && !!server),
           discoverTools: tools,
         });
@@ -418,9 +480,43 @@ export async function dispatchMcpBridgeCommand(
         await removeMcpBridge(sandboxName, server, { force });
         return;
       }
+      case "migrate": {
+        const apply = rest.includes("--apply");
+        const json = rest.includes("--json");
+        const extra = rest.filter((arg) => arg !== "--apply" && arg !== "--json");
+        requireNoExtraArgs(extra, "Usage: nemoclaw <sandbox> mcp migrate [--apply] [--json]");
+        const plan = await migrateMcpBridges(sandboxName, {
+          apply,
+          rebuildSandbox: dependencies.rebuildForMigration,
+        });
+        if (json) {
+          process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
+          return;
+        }
+        if (plan.items.length === 0) {
+          console.log(`  No legacy MCP agent configuration found on '${sandboxName}'.`);
+          return;
+        }
+        for (const item of plan.items) {
+          console.log(
+            `  ${item.action === "migrate" ? "Migrate" : "Verify"} '${item.server}': legacy -> native (${item.url})`,
+          );
+          if (item.activationChanges) {
+            console.log(
+              "    This activates an OpenClaw server that the legacy Mcporter adapter did not load.",
+            );
+          }
+        }
+        console.log(
+          plan.applied
+            ? "  MCP migration completed and legacy registry fields were retired."
+            : "  Preview only. Rerun with --apply to authorize native materialization.",
+        );
+        return;
+      }
       default:
         throw new McpBridgeError(
-          "Usage: nemoclaw <sandbox> mcp <add|update|list|status|restart|remove> [args...]",
+          "Usage: nemoclaw <sandbox> mcp <add|update|list|status|restart|remove|migrate> [args...]",
           2,
         );
     }

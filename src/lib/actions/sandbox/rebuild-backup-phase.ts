@@ -28,8 +28,11 @@ import { recordRebuildRecoveryBackup } from "./rebuild-recreate-journal";
 
 export {
   clearHermesOperatorConfigHandoff,
+  clearRebuildMcpHandoff,
   clearRebuildPolicyHandoff,
+  readRebuildMcpHandoff,
   writeHermesOperatorConfigHandoff,
+  writeRebuildMcpHandoff,
   writeRebuildPolicyHandoff,
 } from "../../state/sandbox";
 

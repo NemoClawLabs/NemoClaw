@@ -29,7 +29,6 @@ vi.mock("./onboard", () => ({
 vi.mock("./root-help", () => ({ help: mocks.help, version: mocks.version }));
 
 import {
-  listManagedMcpCredentialReservations,
   recoverNamedGatewayRuntime,
   runBackupAllAction,
   runGarbageCollectImagesAction,
@@ -111,25 +110,4 @@ describe("global cli action facade", () => {
     expect(mocks.recoverNamedGatewayRuntime).toHaveBeenCalledWith();
   });
 
-  it("uses an injected managed MCP credential reservation query (#9388)", () => {
-    const listReservations = vi.fn(() => [
-      {
-        sandboxName: "hermes",
-        server: "maas-glean",
-        credentialKeys: ["MAAS_GLEAN_TOKEN"],
-      },
-    ]);
-    setGlobalCliActionRuntimeHooksForTest({
-      listManagedMcpCredentialReservations: listReservations,
-    });
-
-    expect(listManagedMcpCredentialReservations()).toEqual([
-      {
-        sandboxName: "hermes",
-        server: "maas-glean",
-        credentialKeys: ["MAAS_GLEAN_TOKEN"],
-      },
-    ]);
-    expect(listReservations).toHaveBeenCalledWith();
-  });
 });

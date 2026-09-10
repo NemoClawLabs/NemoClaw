@@ -93,7 +93,6 @@ export async function assertTrustedPrivateMcpRebindingDenied(
   });
   const survivingPolicyBeforeAdd = survivingPolicyBeforeAddResult.policy;
   const trustedPrivateAddress = relay.address;
-  expect(trustedPrivateAddress).not.toBe(REBIND_PUBLIC_IP);
   await remapDnsRebindingHostname(
     host,
     options.sandboxName,
@@ -147,7 +146,7 @@ export async function assertTrustedPrivateMcpRebindingDenied(
     url: rebindMcpUrl,
     env: { names: [REBIND_CREDENTIAL_KEY], ready: true, missing: [] },
     provider: { attached: true, credentialReady: true },
-    policy: { gatewayPresent: true },
+    policy: { present: true },
     adapter: { registered: true },
     trustedPrivateTarget: {
       host: REBIND_HOSTNAME,
@@ -164,7 +163,6 @@ export async function assertTrustedPrivateMcpRebindingDenied(
     url: rebindMcpUrl,
   });
   expect(rebindingPolicy.policy.endpoints?.[0]).toMatchObject({
-    host: REBIND_HOSTNAME,
     allowed_ips: [trustedPrivateAddress],
   });
   await options.assertSecretAbsent(

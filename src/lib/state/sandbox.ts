@@ -88,6 +88,12 @@ import type {
 } from "./registry/types.js";
 import { cloneSandboxWorkloadReceipt } from "./registry/workload.js";
 import * as registry from "./registry.js";
+import {
+  isRebuildMcpHandoff,
+  type RebuildMcpHandoff,
+  type RebuildMcpHandoffEntry,
+} from "./rebuild/mcp-handoff.js";
+export type { RebuildMcpHandoffEntry } from "./rebuild/mcp-handoff.js";
 import { isSshTransportFailure } from "./ssh-transport.js";
 import { restoreStateFile } from "./state-file-restore.js";
 import { nemoclawStateRoot } from "./state-root.js";
@@ -143,6 +149,8 @@ export interface RebuildManifest {
     /** Cleanup-only identity; retired handoffs cannot be consumed for recovery. */
     retired?: boolean;
   };
+  /** Source-derived MCP state retained only while a rebuild transaction is recoverable. */
+  rebuildMcpHandoff?: RebuildMcpHandoff;
   /** Digest-bound Hermes operator config retained only while rebuild recovery is possible. */
   hermesOperatorConfigHandoff?: {
     file: string;
@@ -388,6 +396,7 @@ export function hasAuthoritativeOpenClawImagePluginProvenance(value: {
   );
 }
 
+
 function isRebuildManifest(value: unknown): value is RebuildManifest {
   if (!isObjectRecord(value) || !isStateDirArray(value.stateDirs)) return false;
   const dir = typeof value.dir === "string" ? value.dir : value.writableDir;
@@ -450,6 +459,7 @@ function isRebuildManifest(value: unknown): value is RebuildManifest {
           value.rebuildPolicyHandoff.retired === true) &&
         value.rebuildPolicyHandoff.file ===
           `rebuild-policy-handoff.${value.rebuildPolicyHandoff.sha256}.yaml`)) &&
+    (value.rebuildMcpHandoff === undefined || isRebuildMcpHandoff(value.rebuildMcpHandoff)) &&
     (value.hermesOperatorConfigHandoff === undefined ||
       (value.agentType === "hermes" &&
         isObjectRecord(value.hermesOperatorConfigHandoff) &&
@@ -2923,6 +2933,78 @@ export function readRebuildPolicyHandoff(manifest: RebuildManifest): string | nu
   const content = readBoundRebuildHandoff(path.join(manifest.backupPath, handoff.file));
   if (content === null) return null;
   return createHash("sha256").update(content).digest("hex") === handoff.sha256 ? content : null;
+}
+
+function cloneRebuildMcpHandoff(
+  handoff: NonNullable<RebuildManifest["rebuildMcpHandoff"]>,
+): NonNullable<RebuildManifest["rebuildMcpHandoff"]> {
+  return {
+    entries: handoff.entries.map((entry) => ({
+      ...entry,
+      env: [...entry.env],
+      ...(entry.denyTools ? { denyTools: [...entry.denyTools] } : {}),
+      ...(entry.allowedIps ? { allowedIps: [...entry.allowedIps] } : {}),
+    })),
+    runtimeSelection: { ...handoff.runtimeSelection },
+    ...(handoff.retired === true ? { retired: true as const } : {}),
+  };
+}
+
+/** Publish source-derived MCP state only for a bounded rebuild recovery transaction. */
+export function writeRebuildMcpHandoff(
+  manifest: RebuildManifest,
+  entries: readonly RebuildMcpHandoffEntry[],
+  runtimeSelection: OpenShellRuntimeSelection,
+): RebuildManifest {
+  const handoff = { entries: [...entries], runtimeSelection };
+  if (!isRebuildMcpHandoff(handoff)) {
+    throw new Error("Cannot persist an invalid rebuild MCP recovery handoff");
+  }
+  const next = { ...manifest, rebuildMcpHandoff: cloneRebuildMcpHandoff(handoff) };
+  writeManifest(manifest.backupPath, next);
+  Object.assign(manifest, next);
+  return next;
+}
+
+/** Read source-derived MCP recovery state only while its rebuild transaction is active. */
+export function readRebuildMcpHandoff(
+  manifest: RebuildManifest,
+): NonNullable<RebuildManifest["rebuildMcpHandoff"]> | null {
+  const handoff = manifest.rebuildMcpHandoff;
+  return handoff && handoff.retired !== true && isRebuildMcpHandoff(handoff)
+    ? cloneRebuildMcpHandoff(handoff)
+    : null;
+}
+
+/** Retire and remove the bounded MCP recovery handoff from a completed rebuild. */
+export function clearRebuildMcpHandoff(
+  manifest: RebuildManifest,
+  options: { retainRetirement?: boolean } = {},
+): boolean {
+  const handoff = manifest.rebuildMcpHandoff;
+  if (!handoff) return true;
+  if (handoff.retired !== true) {
+    const retired = {
+      ...manifest,
+      rebuildMcpHandoff: { ...cloneRebuildMcpHandoff(handoff), retired: true as const },
+    };
+    try {
+      writeManifest(manifest.backupPath, retired);
+    } catch {
+      return false;
+    }
+    Object.assign(manifest, retired);
+  }
+  if (options.retainRetirement === true) return true;
+  const cleared = { ...manifest };
+  delete cleared.rebuildMcpHandoff;
+  try {
+    writeManifest(manifest.backupPath, cleared);
+  } catch {
+    return false;
+  }
+  delete manifest.rebuildMcpHandoff;
+  return true;
 }
 
 /** Retire recovery authority, retain cleanup identity, then delete the handoff artifact. */

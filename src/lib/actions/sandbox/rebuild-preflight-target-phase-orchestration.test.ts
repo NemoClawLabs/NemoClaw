@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   bail: vi.fn(),
   ensureRebuildTargetGatewaySelected: vi.fn(async () => true),
-  getMcpPreparationRuntimeSelection: vi.fn(),
   preflightAuthoritativeOnboardRuntime: vi.fn(async (..._args: unknown[]) => false),
   prepareManagedWorkloadRebuildHandoff: vi.fn(),
   prepareSandboxWorkloadSourceFromRebuildHandoff: vi.fn(),
@@ -20,11 +19,6 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./rebuild-flow-helpers", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./rebuild-flow-helpers")>()),
   ensureRebuildTargetGatewaySelected: mocks.ensureRebuildTargetGatewaySelected,
-}));
-
-vi.mock("./rebuild-mcp-phase", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./rebuild-mcp-phase")>()),
-  getMcpPreparationRuntimeSelection: mocks.getMcpPreparationRuntimeSelection,
 }));
 
 vi.mock("../../onboard/workload/rebuild", async (importOriginal) => ({
@@ -74,11 +68,6 @@ describe("prepareRebuildTargetPreflights", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.getMcpPreparationRuntimeSelection.mockReturnValue({
-      gatewayName: "nemoclaw",
-      localTlsDir: "/authority/tls",
-      workspace: "default",
-    });
     mocks.prepareManagedWorkloadRebuildHandoff.mockResolvedValue(null);
     mocks.preflightAuthoritativeOnboardRuntime.mockResolvedValue(false);
   });
@@ -94,6 +83,11 @@ describe("prepareRebuildTargetPreflights", () => {
       endpointUrl?: string | null;
       hostLocalInferenceReceipt?: string | null;
     } = {},
+    mcpRuntimeSelection?: {
+      gatewayName: string;
+      localTlsDir: string;
+      workspace: string;
+    },
   ) {
     const resumeConfig = {
       provider,
@@ -147,6 +141,7 @@ describe("prepareRebuildTargetPreflights", () => {
       } as never,
       rebuildAgent: "openclaw",
       autoYes: true,
+      mcpRuntimeSelection,
       log: vi.fn(),
       bail: mocks.bail as never,
     });
@@ -525,19 +520,31 @@ describe("prepareRebuildTargetPreflights", () => {
     expect(readinessOptions).not.toHaveProperty("allowDeferredN1xManagedVllm");
   });
 
-  it("freezes one MCP runtime target before authoritative readiness (#10514)", async () => {
+  it("does not derive runtime authority from retired registry MCP fields (#11134)", async () => {
+    const readinessOptions = await prepareN1xTarget("onboard", {
+      bridges: { github: { server: "github" } },
+    });
+
+    expect(readinessOptions).not.toHaveProperty("runtimeSelection");
+  });
+
+  it("passes a frozen MCP runtime target into authoritative readiness (#10514)", async () => {
     const runtimeSelection = {
       gatewayName: "nemoclaw",
       localTlsDir: "/authority/tls",
       workspace: "default",
     };
-    mocks.getMcpPreparationRuntimeSelection.mockReturnValue(runtimeSelection);
+    const readinessOptions = await prepareN1xTarget(
+      "onboard",
+      { bridges: { github: { server: "github" } } },
+      undefined,
+      undefined,
+      null,
+      true,
+      {},
+      runtimeSelection,
+    );
 
-    const readinessOptions = await prepareN1xTarget("onboard", {
-      bridges: { github: { server: "github" } },
-    });
-
-    expect(mocks.getMcpPreparationRuntimeSelection).toHaveBeenCalledOnce();
     expect(readinessOptions?.runtimeSelection).toBe(runtimeSelection);
   });
 });

@@ -18,6 +18,7 @@ import {
   FAKE_MCP_STATUS_RESULT_TOKEN,
   HERMES_DEFERRED_TOOL_SEARCH_MISS,
   parseTryCloudflareOrigin,
+  probePublicTunnel,
   type StartedHttpServer,
   startCompatibleMock,
   startFakeMcpHttpsServer,
@@ -37,6 +38,7 @@ function progressProbe() {
   );
   return { lines, progress };
 }
+
 type CompatibleToolCallResponse = {
   choices: Array<{
     message: {
@@ -151,9 +153,9 @@ describe("authenticated MCP live fixtures", () => {
       auth: `Bearer ${secret}`,
       body: "",
     });
-    expect(
-      shouldRetryMcpDiscoveryAfterRestart(server.observations.slice(observationOffset)),
-    ).toBe(false);
+    expect(shouldRetryMcpDiscoveryAfterRestart(server.observations.slice(observationOffset))).toBe(
+      false,
+    );
 
     slowRequest.end(body.slice(1));
     expect(await observedStatus).toEqual({ ok: true, status: 200 });
@@ -189,6 +191,28 @@ describe("authenticated MCP live fixtures", () => {
     expect(
       parseTryCloudflareOrigin("https://mcp-fixture.trycloudflare.com.attacker.invalid"),
     ).toBeNull();
+  });
+
+  it("keeps the tunnel HEAD request, redirect policy, and five-second timeout on failure", async () => {
+    const failure = new TypeError("private failure");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(failure);
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await probePublicTunnel("https://private.invalid", "/mcp", 405)).toEqual({
+        ready: false,
+        diagnostic: "public HEAD probe failed (TypeError; codes=unknown)",
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(fetchMock).toHaveBeenCalledWith("https://private.invalid/mcp", {
+        method: "HEAD",
+        redirect: "manual",
+        signal: expect.any(AbortSignal),
+      });
+      expect(timeout).toHaveBeenCalledWith(5000);
+    } finally {
+      timeout.mockRestore();
+      fetchMock.mockRestore();
+    }
   });
 
   it("requires three consecutive public readiness probes and resets after a failure", async () => {
@@ -567,13 +591,8 @@ describe("authenticated MCP live fixtures", () => {
       ).status,
     ).toBe(404);
     expect(
-      (
-        await request(
-          "POST",
-          { jsonrpc: "2.0", id: 9, method: "tools/list" },
-          legacy.endpoint,
-        )
-      ).status,
+      (await request("POST", { jsonrpc: "2.0", id: 9, method: "tools/list" }, legacy.endpoint))
+        .status,
     ).toBe(409);
     expect(
       (
@@ -654,46 +673,30 @@ describe("authenticated MCP live fixtures", () => {
       ).status,
     ).toBe(202);
     expect(
+      (await request("POST", { jsonrpc: "2.0", id: 11, method: "tools/list" }, legacy.endpoint))
+        .status,
+    ).toBe(400);
+    expect(
       (
-        await request(
-          "POST",
-          { jsonrpc: "2.0", id: 11, method: "tools/list" },
-          legacy.endpoint,
-        )
+        await request("POST", { jsonrpc: "2.0", id: 11, method: "tools/list" }, legacy.endpoint, {
+          "mcp-protocol-version": "2025-03-26",
+        })
       ).status,
     ).toBe(400);
     expect(
       (
-        await request(
-          "POST",
-          { jsonrpc: "2.0", id: 11, method: "tools/list" },
-          legacy.endpoint,
-          { "mcp-protocol-version": "2025-03-26" },
-        )
-      ).status,
-    ).toBe(400);
-    expect(
-      (
-        await request(
-          "POST",
-          { jsonrpc: "2.0", id: 11, method: "tools/list" },
-          legacy.endpoint,
-          {
-            "mcp-protocol-version": "2025-06-18",
-            "mcp-session-id": "fake-session-cross-route",
-          },
-        )
+        await request("POST", { jsonrpc: "2.0", id: 11, method: "tools/list" }, legacy.endpoint, {
+          "mcp-protocol-version": "2025-06-18",
+          "mcp-session-id": "fake-session-cross-route",
+        })
       ).status,
     ).toBe(400);
     const legacyListEvent = legacy.reader.next();
     expect(
       (
-        await request(
-          "POST",
-          { jsonrpc: "2.0", id: 11, method: "tools/list" },
-          legacy.endpoint,
-          { "mcp-protocol-version": "2025-06-18" },
-        )
+        await request("POST", { jsonrpc: "2.0", id: 11, method: "tools/list" }, legacy.endpoint, {
+          "mcp-protocol-version": "2025-06-18",
+        })
       ).status,
     ).toBe(202);
     expect(JSON.parse((await legacyListEvent).value ?? "")).toMatchObject({
@@ -732,22 +735,18 @@ describe("authenticated MCP live fixtures", () => {
     const requestOffset = server.requests.length;
     const orderedEvents = [legacy.reader.next(), legacy.reader.next()];
     const concurrentResponses = await Promise.all([
-      request(
-        "POST",
-        { jsonrpc: "2.0", id: 30, method: "tools/list" },
-        legacy.endpoint,
-        { "mcp-protocol-version": "2025-06-18" },
-      ),
-      request(
-        "POST",
-        { jsonrpc: "2.0", id: 31, method: "tools/list" },
-        legacy.endpoint,
-        { "mcp-protocol-version": "2025-06-18" },
-      ),
+      request("POST", { jsonrpc: "2.0", id: 30, method: "tools/list" }, legacy.endpoint, {
+        "mcp-protocol-version": "2025-06-18",
+      }),
+      request("POST", { jsonrpc: "2.0", id: 31, method: "tools/list" }, legacy.endpoint, {
+        "mcp-protocol-version": "2025-06-18",
+      }),
     ]);
     expect(concurrentResponses.map((response) => response.status)).toEqual([202, 202]);
     const wireIds = await Promise.all(
-      orderedEvents.map(async (event) => (JSON.parse((await event).value ?? "") as { id: number }).id),
+      orderedEvents.map(
+        async (event) => (JSON.parse((await event).value ?? "") as { id: number }).id,
+      ),
     );
     const recordedResponses = server.requests
       .slice(requestOffset)
@@ -764,12 +763,9 @@ describe("authenticated MCP live fixtures", () => {
     await expect.poll(() => server.activeLegacySessionCount()).toBe(1);
     expect(
       (
-        await request(
-          "POST",
-          { jsonrpc: "2.0", id: 40, method: "tools/list" },
-          legacy.endpoint,
-          { "mcp-protocol-version": "2025-06-18" },
-        )
+        await request("POST", { jsonrpc: "2.0", id: 40, method: "tools/list" }, legacy.endpoint, {
+          "mcp-protocol-version": "2025-06-18",
+        })
       ).status,
     ).toBe(404);
     secondLegacy.channel.destroy();
@@ -1075,7 +1071,7 @@ describe("authenticated MCP live fixtures", () => {
   });
 
   it("uses Hermes progressive disclosure when the MCP tool is deferred", async () => {
-    const deferredToolName = "mcp__fake__fake_echo";
+    const deferredToolName = "fake__fake_echo";
     const resultToken = "MCP_AUTH_REWRITE_OK::deferred-fixture";
     const server = await startCompatibleMock({
       apiKey: "compatible-key",
@@ -1221,6 +1217,97 @@ describe("authenticated MCP live fixtures", () => {
     expect(finalBody).toMatchObject({
       choices: [{ message: { content: resultToken } }],
     });
+  });
+
+  it("uses the OpenClaw tool catalog before calling a deferred MCP tool", async () => {
+    const deferredToolName = "mcp__fake__fake_echo";
+    const resultToken = "MCP_AUTH_REWRITE_OK::openclaw-fixture";
+    const server = await startCompatibleMock({
+      apiKey: "compatible-key",
+      model: "mock/model",
+      toolChallenge: "openclaw-fixture",
+      toolResultToken: resultToken,
+      openClawToolSearch: { query: "fake echo", toolNames: ["mcp__fake__fake_echo"] },
+    });
+    servers.push(server);
+    const call = async (
+      messages: Array<{ role: string; content: string; tool_call_id?: string }>,
+    ) =>
+      (await (
+        await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer compatible-key",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "mock/model",
+            messages,
+            tools: ["tool_search", "tool_describe", "tool_call"].map((name) => ({
+              type: "function",
+              function: { name, parameters: {} },
+            })),
+          }),
+        })
+      ).json()) as CompatibleToolCallResponse;
+    const searchBody = await call([{ role: "user", content: "use the deferred tool" }]);
+    expect(searchBody.choices[0].message.tool_calls[0]).toMatchObject({
+      id: "call_openclaw_tool_search",
+      function: {
+        name: "tool_search",
+        arguments: JSON.stringify({ query: "fake echo", limit: 8 }),
+      },
+    });
+    const searchResult = {
+      role: "tool",
+      tool_call_id: "openclaw-rewritten-search-id",
+      content: JSON.stringify([
+        {
+          type: "text",
+          text: JSON.stringify({
+            query: "fake echo",
+            count: 1,
+            matches: [{ name: deferredToolName, description: "Deferred echo" }],
+          }),
+        },
+      ]),
+    };
+    expect((await call([searchResult])).choices[0].message.tool_calls[0]).toMatchObject({
+      id: "call_openclaw_tool_describe",
+      function: { name: "tool_describe", arguments: JSON.stringify({ id: deferredToolName }) },
+    });
+    const descriptionResult = {
+      role: "tool",
+      tool_call_id: "openclaw-rewritten-describe-id",
+      content: JSON.stringify([
+        {
+          type: "text",
+          text: JSON.stringify({
+            name: deferredToolName,
+            parameters: { properties: { challenge: { type: "string" } } },
+          }),
+        },
+      ]),
+    };
+    expect(
+      (await call([searchResult, descriptionResult])).choices[0].message.tool_calls[0],
+    ).toMatchObject({
+      id: "call_openclaw_tool_call",
+      function: {
+        name: "tool_call",
+        arguments: JSON.stringify({
+          id: deferredToolName,
+          args: { challenge: "openclaw-fixture" },
+        }),
+      },
+    });
+    expect(
+      await call([
+        searchResult,
+        descriptionResult,
+        { role: "tool", tool_call_id: "call_openclaw_tool_call", content: resultToken },
+      ]),
+    ).toMatchObject({ choices: [{ message: { content: resultToken } }] });
   });
 
   it("fails closed when a Hermes deferred tool leaks into the model registry", async () => {

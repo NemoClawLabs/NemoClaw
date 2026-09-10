@@ -8,6 +8,7 @@ import http from "node:http";
 import https from "node:https";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
+import { isProxy } from "node:util/types";
 
 import type { CleanupRegistry } from "../fixtures/cleanup.ts";
 import {
@@ -106,6 +107,48 @@ const QUICK_TUNNEL_ATTEMPT_TIMEOUT_MS = 45_000;
 const QUICK_TUNNEL_CONSECUTIVE_READY_PROBES = 3;
 const QUICK_TUNNEL_DISCOVERY_CARRY_LIMIT = 512;
 const OMITTED_CLOUDFLARED_OUTPUT_DIAGNOSTIC = "cloudflared child output omitted from diagnostics";
+const TUNNEL_ERROR_NODE_LIMIT = 8;
+const TUNNEL_ERROR_CLASSES = new Map<object, string>([
+  [TypeError.prototype, "TypeError"],
+  [RangeError.prototype, "RangeError"],
+  [SyntaxError.prototype, "SyntaxError"],
+  [ReferenceError.prototype, "ReferenceError"],
+  [URIError.prototype, "URIError"],
+  [EvalError.prototype, "EvalError"],
+  [AggregateError.prototype, "AggregateError"],
+  [Error.prototype, "Error"],
+  [DOMException.prototype, "DOMException"],
+]);
+const DOM_EXCEPTION_NAME = Object.getOwnPropertyDescriptor(DOMException.prototype, "name")?.get;
+const TUNNEL_NETWORK_ERROR_CODES = new Set([
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ECONNABORTED",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ETIMEDOUT",
+  "EPIPE",
+  "ENETDOWN",
+  "EADDRNOTAVAIL",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_ABORTED",
+  "UND_ERR_HEADERS_OVERFLOW",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "ERR_SSL_WRONG_VERSION_NUMBER",
+  "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR",
+  "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE",
+]);
 const CLOUDFLARED_ENV_NAMES = new Set([
   "PATH",
   "TMPDIR",
@@ -206,11 +249,7 @@ function queueLegacyMcpResponse(
   requestId: string | number | null,
   payload: unknown,
 ): LegacyQueueResult {
-  if (
-    session.phase === "closed" ||
-    session.response.destroyed ||
-    session.response.writableEnded
-  ) {
+  if (session.phase === "closed" || session.response.destroyed || session.response.writableEnded) {
     return { ok: false, status: 410, message: "legacy MCP event stream is closed" };
   }
   const requestIdKey = jsonRpcIdKey(requestId);
@@ -317,7 +356,65 @@ export function buildCloudflaredQuickTunnelArgs(port: number): string[] {
   ];
 }
 
-async function probePublicTunnel(
+function tunnelErrorDataProperty(value: unknown, key: string): unknown {
+  try {
+    if (typeof value !== "object" || value === null || isProxy(value)) return undefined;
+    // Reading a data descriptor never invokes an error-supplied accessor.
+    return Object.getOwnPropertyDescriptor(value, key)?.value;
+  } catch {
+    return undefined;
+  }
+}
+
+function tunnelErrorClass(error: unknown): string {
+  try {
+    let current = error;
+    for (let depth = 0; depth < 4; depth += 1) {
+      if (typeof current !== "object" || current === null || isProxy(current)) break;
+      current = Object.getPrototypeOf(current);
+      const known = TUNNEL_ERROR_CLASSES.get(current as object);
+      if (known === "DOMException") {
+        const name = DOM_EXCEPTION_NAME?.call(error);
+        return name === "AbortError"
+          ? "AbortError"
+          : name === "TimeoutError"
+            ? "TimeoutError"
+            : known;
+      }
+      if (known) return known;
+    }
+  } catch {
+    // Forged prototypes and unavailable native brands remain unclassified.
+  }
+  return "unknown error";
+}
+
+function describePublicTunnelFailure(error: unknown): string {
+  const pending: unknown[] = [error];
+  const seen = new Set<unknown>();
+  const codes = new Set<string>();
+  for (let index = 0; index < pending.length && index < TUNNEL_ERROR_NODE_LIMIT; index += 1) {
+    const current = pending[index];
+    if (seen.has(current)) continue;
+    seen.add(current);
+    const code = tunnelErrorDataProperty(current, "code");
+    if (typeof code === "string" && code.length <= 64 && TUNNEL_NETWORK_ERROR_CODES.has(code)) {
+      codes.add(code);
+    }
+    const cause = tunnelErrorDataProperty(current, "cause");
+    if (cause !== undefined && pending.length < TUNNEL_ERROR_NODE_LIMIT) pending.push(cause);
+    const errors = tunnelErrorDataProperty(current, "errors");
+    if (!isProxy(errors) && Array.isArray(errors)) {
+      const count = Math.min(errors.length, TUNNEL_ERROR_NODE_LIMIT - pending.length);
+      for (let child = 0; child < count; child += 1) {
+        pending.push(tunnelErrorDataProperty(errors, String(child)));
+      }
+    }
+  }
+  return `${tunnelErrorClass(error)}; codes=${[...codes].join(",") || "unknown"}`;
+}
+
+export async function probePublicTunnel(
   origin: string,
   readinessPath: string,
   readinessStatus: number,
@@ -339,9 +436,7 @@ async function probePublicTunnel(
   } catch (error) {
     return {
       ready: false,
-      // Avoid reflecting request URLs or child output here. The error class is
-      // enough to distinguish DNS/transport failure without risking headers.
-      diagnostic: `public HEAD ${readinessPath} failed (${error instanceof Error ? error.name : "unknown error"})`,
+      diagnostic: `public HEAD probe failed (${describePublicTunnelFailure(error)})`,
     };
   }
 }
@@ -478,6 +573,7 @@ export async function startCompatibleMock(options: {
   toolNames?: string[];
   deferredToolName?: string;
   progressiveToolSearch?: { toolName: string; query: string };
+  openClawToolSearch?: { toolNames: string[]; query: string };
   deniedToolProbe?:
     | { mode: "bridge"; promptMarker: string; resultToken: string; toolName: string }
     | {
@@ -488,6 +584,7 @@ export async function startCompatibleMock(options: {
         toolName: string;
       };
 }): Promise<StartedHttpServer> {
+  let selectedOpenClawToolName: string | undefined;
   const server = http.createServer(async (req, res) => {
     const requestPath = new URL(req.url ?? "/", "http://compatible.mock").pathname;
     const auth = req.headers.authorization === `Bearer ${options.apiKey}`;
@@ -539,19 +636,40 @@ export async function startCompatibleMock(options: {
           requiredContent.every((value) => content.includes(value))
         );
       };
+      const parseToolResultRecord = (
+        value: unknown,
+        depth = 0,
+      ): Record<string, unknown> | undefined => {
+        if (depth > 4) return undefined;
+        if (typeof value === "string") {
+          try {
+            return parseToolResultRecord(JSON.parse(value), depth + 1);
+          } catch {
+            return undefined;
+          }
+        }
+        if (Array.isArray(value)) {
+          for (const entry of value) {
+            const parsed = parseToolResultRecord(entry, depth + 1);
+            if (parsed) return parsed;
+          }
+          return undefined;
+        }
+        if (!value || typeof value !== "object") return undefined;
+        const record = value as Record<string, unknown>;
+        for (const key of ["details", "payload", "text", "content"] as const) {
+          if (!Object.hasOwn(record, key)) continue;
+          const parsed = parseToolResultRecord(record[key], depth + 1);
+          if (parsed) return parsed;
+        }
+        return record;
+      };
       const parsedToolResult = (index: number, toolCallId: string) => {
         const message = toolResults[index];
-        if (message?.tool_call_id !== toolCallId || typeof message.content !== "string") {
+        if (message?.tool_call_id !== toolCallId) {
           return undefined;
         }
-        try {
-          const parsed = JSON.parse(message.content);
-          return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-            ? (parsed as Record<string, unknown>)
-            : undefined;
-        } catch {
-          return undefined;
-        }
+        return parseToolResultRecord(message.content);
       };
       const isDeniedBridgeToolResult = (index: number, toolCallId: string) => {
         const message = toolResults[index];
@@ -601,9 +719,7 @@ export async function startCompatibleMock(options: {
         ) {
           return "invalid";
         }
-        return names.includes(toolName)
-          ? "target"
-          : "miss";
+        return names.includes(toolName) ? "target" : "miss";
       };
       const hasExpectedHermesDescription = (index: number, toolName: string) => {
         const parsed = parsedToolResult(index, "call_hermes_tool_describe");
@@ -632,10 +748,58 @@ export async function startCompatibleMock(options: {
           Object.hasOwn(properties, "challenge")
         );
       };
+      const classifyOpenClawSearchResult = (index: number): "target" | "miss" | "invalid" => {
+        const search = options.openClawToolSearch;
+        const message = toolResults[index];
+        if (!search || !message) return "invalid";
+        const content = JSON.stringify(message.content);
+        selectedOpenClawToolName = search.toolNames.find((name) => content.includes(name));
+        return selectedOpenClawToolName ? "target" : "miss";
+      };
+      const hasExpectedOpenClawDescription = (index: number): boolean => {
+        const message = toolResults[index];
+        if (!message || !selectedOpenClawToolName) {
+          return false;
+        }
+        const content = JSON.stringify(message.content);
+        return content.includes(selectedOpenClawToolName) && content.includes("challenge");
+      };
+      const collectOpenClawSearchIdentifiers = (
+        value: unknown,
+        identifiers: string[] = [],
+        depth = 0,
+      ): string[] => {
+        if (depth > 6) return identifiers;
+        if (typeof value === "string") {
+          try {
+            return collectOpenClawSearchIdentifiers(JSON.parse(value), identifiers, depth + 1);
+          } catch {
+            return identifiers;
+          }
+        }
+        if (Array.isArray(value)) {
+          for (const entry of value) {
+            collectOpenClawSearchIdentifiers(entry, identifiers, depth + 1);
+          }
+          return identifiers;
+        }
+        if (!value || typeof value !== "object") return identifiers;
+        const record = value as Record<string, unknown>;
+        for (const key of ["name", "id"] as const) {
+          if (typeof record[key] === "string" && !identifiers.includes(record[key])) {
+            identifiers.push(record[key]);
+          }
+        }
+        for (const nested of Object.values(record)) {
+          collectOpenClawSearchIdentifiers(nested, identifiers, depth + 1);
+        }
+        return identifiers;
+      };
       let plannedToolCall:
         | { id: string; name: string; arguments: Record<string, unknown> }
         | undefined;
       let protocolError: string | undefined;
+      let openClawSearchDiagnostic = "";
       let deniedToolProbeComplete = false;
 
       if (deniedToolProbeRequested && deniedToolProbe) {
@@ -649,8 +813,7 @@ export async function startCompatibleMock(options: {
               arguments: { name: deniedToolProbe.toolName, arguments: {} },
             };
           } else if (toolResultCount === 1) {
-            deniedToolProbeComplete =
-              isDeniedBridgeToolResult(0, "call_denied_tool_bridge");
+            deniedToolProbeComplete = isDeniedBridgeToolResult(0, "call_denied_tool_bridge");
             if (!deniedToolProbeComplete) {
               protocolError = "denied-tool bridge call did not report a policy denial";
             }
@@ -669,9 +832,7 @@ export async function startCompatibleMock(options: {
           };
         } else if (
           toolResultCount === 1 &&
-          !hasExpectedToolResult(0, "call_denied_tool_search", [
-            `- ${deniedToolProbe.toolName}:`,
-          ])
+          !hasExpectedToolResult(0, "call_denied_tool_search", [`- ${deniedToolProbe.toolName}:`])
         ) {
           protocolError = "search_tools did not return the denied progressive target";
         } else if (toolResultCount === 1 && !visibleToolNames.has(deniedToolProbe.toolName)) {
@@ -691,6 +852,64 @@ export async function startCompatibleMock(options: {
           }
         } else {
           protocolError = "denied progressive tool returned an unexpected result sequence";
+        }
+      } else if (!sawAuthenticatedToolResult && options.openClawToolSearch) {
+        const bridgeNames = ["tool_search", "tool_describe", "tool_call"];
+        const missingBridges = bridgeNames.filter((name) => !visibleToolNames.has(name));
+        if (options.openClawToolSearch.toolNames.some((name) => visibleToolNames.has(name))) {
+          protocolError = "OpenClaw deferred MCP target leaked into model tools";
+        } else if (missingBridges.length > 0) {
+          protocolError = `OpenClaw tool catalog bridges missing: ${missingBridges.join(", ")}`;
+        } else if (toolResultCount === 0) {
+          plannedToolCall = {
+            id: "call_openclaw_tool_search",
+            name: "tool_search",
+            arguments: { query: options.openClawToolSearch.query, limit: 8 },
+          };
+        } else if (toolResultCount === 1) {
+          const searchResult = classifyOpenClawSearchResult(0);
+          if (searchResult === "miss") {
+            const identifiers = collectOpenClawSearchIdentifiers(toolResults[0]?.content);
+            const terms = options.openClawToolSearch.query
+              .toLowerCase()
+              .split(/[^a-z0-9]+/u)
+              .filter(Boolean);
+            selectedOpenClawToolName = identifiers.find((identifier) => {
+              const normalized = identifier.toLowerCase().replace(/[^a-z0-9]+/gu, " ");
+              return terms.every((term) => normalized.includes(term));
+            });
+            openClawSearchDiagnostic =
+              identifiers.length > 0
+                ? identifiers.join(", ").slice(0, 512)
+                : JSON.stringify(toolResults[0]?.content).replace(/\s+/gu, " ").slice(0, 512);
+          }
+          if (searchResult === "target" || selectedOpenClawToolName) {
+            plannedToolCall = {
+              id: "call_openclaw_tool_describe",
+              name: "tool_describe",
+              arguments: { id: selectedOpenClawToolName },
+            };
+          } else {
+            protocolError =
+              searchResult === "miss"
+                ? `OpenClaw tool_search did not find the deferred MCP target; observed ${openClawSearchDiagnostic || "no identifiers"}`
+                : "OpenClaw returned an invalid tool_search result";
+          }
+        } else if (toolResultCount === 2) {
+          if (hasExpectedOpenClawDescription(1) && selectedOpenClawToolName) {
+            plannedToolCall = {
+              id: "call_openclaw_tool_call",
+              name: "tool_call",
+              arguments: {
+                id: selectedOpenClawToolName,
+                args: { challenge: options.toolChallenge },
+              },
+            };
+          } else {
+            protocolError = "OpenClaw tool_describe did not return the deferred MCP schema";
+          }
+        } else {
+          protocolError = "OpenClaw returned an unexpected tool catalog result sequence";
         }
       } else if (!sawAuthenticatedToolResult && options.progressiveToolSearch) {
         const { query, toolName } = options.progressiveToolSearch;
@@ -777,29 +996,29 @@ export async function startCompatibleMock(options: {
       const responseMessage = deniedToolProbeComplete
         ? { role: "assistant", content: deniedToolProbe?.resultToken }
         : sawAuthenticatedToolResult
-        ? {
-            role: "assistant",
-            content: options.toolResultToken,
-          }
-        : protocolError
-          ? { role: "assistant", content: `mock protocol error: ${protocolError}` }
-          : plannedToolCall && (deniedToolProbeRequested || options.toolChallenge)
-            ? {
-                role: "assistant",
-                content: null,
-                tool_calls: [
-                  {
-                    index: 0,
-                    id: plannedToolCall.id,
-                    type: "function",
-                    function: {
-                      name: plannedToolCall.name,
-                      arguments: JSON.stringify(plannedToolCall.arguments),
+          ? {
+              role: "assistant",
+              content: options.toolResultToken,
+            }
+          : protocolError
+            ? { role: "assistant", content: `mock protocol error: ${protocolError}` }
+            : plannedToolCall && (deniedToolProbeRequested || options.toolChallenge)
+              ? {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: plannedToolCall.id,
+                      type: "function",
+                      function: {
+                        name: plannedToolCall.name,
+                        arguments: JSON.stringify(plannedToolCall.arguments),
+                      },
                     },
-                  },
-                ],
-              }
-            : { role: "assistant", content: "ok" };
+                  ],
+                }
+              : { role: "assistant", content: "ok" };
       const finishReason = "tool_calls" in responseMessage ? "tool_calls" : "stop";
       if (body.stream) {
         res.writeHead(200, {
@@ -1091,10 +1310,13 @@ export async function startFakeMcpHttpsServer(options: {
     }
     const requestId = jsonRpcId(parsedPayload.id);
     const isNotification =
-      typeof parsedPayload.method === "string" && MCP_NOTIFICATION_METHODS.has(parsedPayload.method);
+      typeof parsedPayload.method === "string" &&
+      MCP_NOTIFICATION_METHODS.has(parsedPayload.method);
     if (legacySession) {
       if (sessionId !== "") {
-        respondJson(400, { error: { message: "legacy MCP requests must not mix session headers" } });
+        respondJson(400, {
+          error: { message: "legacy MCP requests must not mix session headers" },
+        });
         return;
       }
       if (parsedPayload.method === "initialize") {

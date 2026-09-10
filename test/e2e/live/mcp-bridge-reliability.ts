@@ -1,14 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  buildHermesMcpStatusCommand,
-  OPENCLAW_MCPORTER_ROOT,
-} from "../../../src/lib/actions/sandbox/mcp-bridge-adapter-status";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import { buildMcpBridgeExactMainEnv } from "./mcp-bridge-onboard-env.ts";
+import type { McpBridgeE2eScope } from "./mcp-bridge-agent-selection.ts";
+
+import { buildHermesMcpStatusCommand } from "../../../src/lib/actions/sandbox/mcp-bridge-adapter-status";
 import { buildMcpCredentialRevisionObservationCommand } from "../../../src/lib/actions/sandbox/mcp-bridge-provider";
 import type { McpAttachedCredentialRevision } from "../../../src/lib/actions/sandbox/mcp-bridge-provider-readiness";
+import type { McpSourceEntry } from "../../../src/lib/actions/sandbox/mcp-bridge-contracts";
 import { shellQuote } from "../../../src/lib/core/shell-quote";
-import type { McpBridgeEntry } from "../../../src/lib/state/registry";
 import { buildAvailabilityProbeEnv } from "../fixtures/availability-env.ts";
 import type { ArtifactSink } from "../fixtures/artifacts.ts";
 import { assertExitZero, resultText } from "../fixtures/clients/command.ts";
@@ -25,6 +28,194 @@ import {
 } from "./mcp-bridge-hermes-http.ts";
 import { MCP_PROVIDER_REWRITE_PROBE_SOURCE } from "./mcp-provider-rewrite-probe.ts";
 import { FAKE_MCP_STATUS_RESULT_TOKEN } from "./mcp-bridge-servers.ts";
+
+export async function withMcpRegistryUnavailable(
+  registryFile: string,
+  mode: "missing" | "corrupt",
+  action: () => Promise<void>,
+): Promise<void> {
+  const backup = `${registryFile}.mcp-e2e-${randomUUID()}`;
+  const corrupt = "{invalid MCP registry fixture";
+  fs.renameSync(registryFile, backup);
+  try {
+    if (mode === "corrupt") fs.writeFileSync(registryFile, corrupt, { flag: "wx", mode: 0o600 });
+    await action();
+    if (mode === "missing")
+      assert.equal(fs.existsSync(registryFile), false, "MCP recreated the missing registry");
+    else
+      assert.equal(
+        fs.readFileSync(registryFile, "utf8") === corrupt,
+        true,
+        "MCP rewrote the corrupt registry",
+      );
+  } finally {
+    fs.renameSync(backup, registryFile);
+  }
+}
+
+export async function assertMcpRestartWithoutRegistry(
+  host: HostCliClient,
+  artifacts: ArtifactSink,
+  options: {
+    sandboxName: string;
+    registryFile: string;
+    mode: "missing" | "corrupt";
+    scope: McpBridgeE2eScope;
+  },
+  restart: () => Promise<void>,
+): Promise<void> {
+  if (options.scope !== "full") return restart();
+  await withMcpRegistryUnavailable(options.registryFile, options.mode, async () => {
+    const list = await host.nemoclaw([options.sandboxName, "mcp", "list", "--json"], {
+      artifactName: `mcp-${options.mode}-registry-list`,
+      env: buildAvailabilityProbeEnv(),
+      timeoutMs: 60_000,
+    });
+    assertExitZero(list, "fresh MCP list operates without a usable registry");
+    assert.ok(
+      JSON.parse(list.stdout).bridges.some((entry: { server: string }) => entry.server === "fake"),
+    );
+    await restart();
+    const status = await host.nemoclaw([options.sandboxName, "mcp", "status", "fake", "--json"], {
+      artifactName: `mcp-${options.mode}-registry-status`,
+      env: buildAvailabilityProbeEnv(),
+      timeoutMs: 60_000,
+    });
+    assertExitZero(status, "fresh MCP status verifies restart without a usable registry");
+    const observed = JSON.parse(status.stdout);
+    assert.equal(observed.adapter.registered, true);
+    assert.equal(observed.provider.credentialReady, true);
+  });
+  await artifacts.writeJson(`mcp-${options.mode}-registry-proof.json`, {
+    sandbox: options.sandboxName,
+    mode: options.mode,
+    list: "passed",
+    restart: "passed",
+    status: "passed",
+    registryRecreated: false,
+  });
+}
+
+export function buildLegacyMcpMigrationFixtureScript(options: {
+  agent: "openclaw" | "langchain-deepagents-code";
+  configDir: string;
+  serverName: string;
+  verifyMigrated?: boolean;
+}): string {
+  const encoded = Buffer.from(JSON.stringify(options)).toString("base64");
+  return [
+    "set -eu",
+    "python3 - <<'PY'",
+    "import base64, json, pathlib, re, os, stat",
+    `options = json.loads(base64.b64decode('${encoded}'))`,
+    "root = pathlib.Path(options['configDir']); server = options['serverName']",
+    "openclaw = options['agent'] == 'openclaw'",
+    "native_path = root / ('openclaw.json' if openclaw else '.mcp.json')",
+    "legacy_path = root / ('workspace/config/mcporter.json' if openclaw else '.nemoclaw-mcp.json')",
+    "def read(path):",
+    "    assert not path.is_symlink(), 'fixture source must be regular'",
+    "    return json.loads(path.read_text()) if path.exists() else {}",
+    "def write(path, data, owner=(os.getuid(), os.getgid()), mode=0o600):",
+    "    path.parent.mkdir(parents=True, exist_ok=True)",
+    "    temporary = path.with_name(path.name + '.migration-e2e-tmp')",
+    "    with temporary.open('x') as output: json.dump(data, output)",
+    "    os.chown(temporary, *owner); os.chmod(temporary, mode); temporary.replace(path)",
+    "native = read(native_path); legacy = read(legacy_path)",
+    "native_metadata = native_path.stat(follow_symlinks=False)",
+    "servers = native['mcp']['servers'] if openclaw else native['mcpServers']",
+    "legacy_servers = legacy.setdefault('mcpServers', {})",
+    "entry = servers[server]",
+    "assert re.fullmatch(r'Bearer openshell:resolve:env:v[0-9]{1,20}_FAKE_MCP_SECRET', entry['headers']['Authorization']), 'fixture requires a revision-scoped placeholder'",
+    "assert server not in legacy_servers, 'legacy fixture already exists'",
+    "if not options.get('verifyMigrated'):",
+    "    legacy_servers[server] = {'baseUrl': entry['url'], 'headers': entry['headers']} if openclaw else entry",
+    "    write(legacy_path, legacy)",
+    "    del servers[server]; write(native_path, native, (native_metadata.st_uid, native_metadata.st_gid), stat.S_IMODE(native_metadata.st_mode))",
+    "    assert server not in (read(native_path)['mcp']['servers'] if openclaw else read(native_path)['mcpServers'])",
+    "    assert server in read(legacy_path)['mcpServers']",
+    "print('native-migration-verified' if options.get('verifyMigrated') else 'legacy-migration-staged')",
+    "PY",
+  ].join("\n");
+}
+
+export async function assertLegacyMcpMigration(
+  host: HostCliClient,
+  sandbox: SandboxClient,
+  artifacts: ArtifactSink,
+  options: {
+    agent: "openclaw" | "langchain-deepagents-code";
+    sandboxName: string;
+    compatibleKey: string;
+    envOverlay?: NodeJS.ProcessEnv;
+  },
+): Promise<void> {
+  const prefix = `${options.agent}-legacy-mcp-migration`;
+  const fixture = {
+    agent: options.agent,
+    configDir: options.agent === "openclaw" ? "/sandbox/.openclaw" : "/sandbox/.deepagents",
+    serverName: "fake",
+  };
+  const staged = await sandbox.execShell(
+    options.sandboxName,
+    trustedSandboxShellScript(buildLegacyMcpMigrationFixtureScript(fixture)),
+    {
+      artifactName: `${prefix}-stage`,
+      env: buildAvailabilityProbeEnv(),
+      timeoutMs: 60_000,
+    },
+  );
+  assertExitZero(
+    staged,
+    `${prefix} stages an actual legacy source without changing policy or providers`,
+  );
+  const preview = await host.nemoclaw([options.sandboxName, "mcp", "migrate", "--json"], {
+    artifactName: `${prefix}-preview`,
+    env: buildAvailabilityProbeEnv(),
+    timeoutMs: 60_000,
+  });
+  assertExitZero(preview, `${prefix} previews the legacy source`);
+  const plan = JSON.parse(preview.stdout);
+  assert.equal(plan.applied, false);
+  assert.equal(plan.items.length, 1);
+  const item = plan.items[0];
+  assert.deepEqual(
+    [item.server, item.agent, item.source, item.action, item.policyPresent, item.providerAttached],
+    ["fake", options.agent, "legacy-agent", "migrate", true, true],
+  );
+  const applied = await host.nemoclaw([options.sandboxName, "mcp", "migrate", "--apply"], {
+    artifactName: `${prefix}-apply`,
+    env: {
+      ...buildMcpBridgeExactMainEnv({ envOverlay: options.envOverlay }),
+      COMPATIBLE_API_KEY: options.compatibleKey,
+      NVIDIA_INFERENCE_API_KEY: options.compatibleKey,
+    },
+    redactionValues: [options.compatibleKey],
+    timeoutMs: 25 * 60_000,
+  });
+  assertExitZero(applied, `${prefix} applies native migration using the existing provider`);
+  const verified = await sandbox.execShell(
+    options.sandboxName,
+    trustedSandboxShellScript(
+      buildLegacyMcpMigrationFixtureScript({ ...fixture, verifyMigrated: true }),
+    ),
+    {
+      artifactName: `${prefix}-verify`,
+      env: buildAvailabilityProbeEnv(),
+      timeoutMs: 60_000,
+    },
+  );
+  assertExitZero(verified, `${prefix} leaves native placeholders and removes the legacy entry`);
+  await artifacts.writeJson(`${prefix}-proof.json`, {
+    agent: options.agent,
+    sandbox: options.sandboxName,
+    server: "fake",
+    legacySource: item.source,
+    previewed: true,
+    applied: true,
+    nativeVerified: true,
+    authenticatedToolExecution: "required by the following real MCP tool call",
+  });
+}
 
 const ANSI_ESCAPE = /\u001b\[[0-9;]*m/gu;
 const HERMES_GATEWAY_DRAINING_RETRIES = 3;
@@ -64,6 +255,7 @@ export async function runDeniedMcpToolCall(host: HostCliClient, options: {
   agent: "openclaw" | "hermes" | "langchain-deepagents-code";
   artifactName: string;
   deniedTool?: string;
+  mcpUrl?: string;
   sandbox: SandboxClient;
   sandboxName: string;
   serverName: string;
@@ -112,9 +304,17 @@ export async function runDeniedMcpToolCall(host: HostCliClient, options: {
     MCP_BRIDGE_DENIED_TOOL_PROMPT,
     payload,
   ];
+  if (options.agent === "openclaw" && !options.mcpUrl) {
+    throw new Error("OpenClaw denied-tool proof requires the exact MCP URL");
+  }
+  const deniedToolName = options.deniedTool ?? MCP_BRIDGE_DENIED_TOOL_NAME;
   const command =
     options.agent === "openclaw"
-      ? `nemoclaw-start mcporter --root ${shellQuote(OPENCLAW_MCPORTER_ROOT)} call ${options.serverName}.${options.deniedTool ?? MCP_BRIDGE_DENIED_TOOL_NAME} --args '{}' --output json`
+      ? [
+          `nemoclaw-start node - ${shellQuote(options.mcpUrl ?? "")} tools/call deny FAKE_MCP_SECRET ${shellQuote(deniedToolName)} <<'NEMOCLAW_MCP_DENIED_TOOL_PROBE'`,
+          MCP_PROVIDER_REWRITE_PROBE_SOURCE,
+          "NEMOCLAW_MCP_DENIED_TOOL_PROBE",
+        ].join("\n")
       : options.agent === "hermes"
         ? [
             ...HERMES_MCP_ENV_LOAD_COMMANDS,
@@ -164,6 +364,7 @@ export async function runOpenClawDeniedToolUpdateProof(
   sandbox: SandboxClient,
   requests: Array<{ auth: string; rpcMethod?: string; rpcToolName?: string }>,
   sandboxName: string,
+  mcpUrl: string,
 ): Promise<{
   after: number;
   before: number;
@@ -183,12 +384,15 @@ export async function runOpenClawDeniedToolUpdateProof(
     commandOptions("openclaw-clear-denied-tools"),
   );
   const before = requests.filter((request) => request.rpcMethod === "tools/call").length;
-  const call = await sandbox.execShell(
+  const call = await runMcpProviderRewriteProbe(
+    sandbox,
     sandboxName,
-    trustedSandboxShellScript(
-      `nemoclaw-start mcporter --root ${shellQuote(OPENCLAW_MCPORTER_ROOT)} call fake.${MCP_BRIDGE_DENIED_TOOL_NAME} --args '{}' --output json`,
-    ),
-    commandOptions("openclaw-formerly-denied-tool-call"),
+    mcpUrl,
+    "tools/call",
+    "allow",
+    "openclaw-formerly-denied-tool-call",
+    "FAKE_MCP_SECRET",
+    MCP_BRIDGE_DENIED_TOOL_NAME,
   );
   const calls = requests.filter((request) => request.rpcMethod === "tools/call");
   const replace = await host.nemoclaw(
@@ -199,6 +403,7 @@ export async function runOpenClawDeniedToolUpdateProof(
     agent: "openclaw",
     artifactName: "openclaw-restored-denied-tool-call",
     deniedTool: MCP_BRIDGE_DENIED_TOOL_NAME,
+    mcpUrl,
     requests,
     sandbox,
     sandboxName,
@@ -233,13 +438,14 @@ export async function runMcpProviderRewriteProbe(
   expectation: "allow" | "deny" | "deny-strict",
   artifactName: string,
   credentialKey = "FAKE_MCP_SECRET",
+  toolName?: string,
 ): Promise<ShellProbeResult> {
   return sandbox.execShell(
     sandboxName,
     trustedSandboxShellScript(
       [
         "set -eu",
-        `nemoclaw-start node - ${shellQuote(targetUrl)} ${shellQuote(method)} ${shellQuote(expectation)} ${shellQuote(credentialKey)} <<'NEMOCLAW_MCP_PROVIDER_REWRITE_PROBE'`,
+        `nemoclaw-start node - ${shellQuote(targetUrl)} ${shellQuote(method)} ${shellQuote(expectation)} ${shellQuote(credentialKey)}${toolName ? ` ${shellQuote(toolName)}` : ""} <<'NEMOCLAW_MCP_PROVIDER_REWRITE_PROBE'`,
         MCP_PROVIDER_REWRITE_PROBE_SOURCE,
         "NEMOCLAW_MCP_PROVIDER_REWRITE_PROBE",
       ].join("\n"),
@@ -373,17 +579,17 @@ export function isHermesMcpStatusAwaitingRestartSettlement(
     env?.ready === true &&
     typeof provider?.name === "string" &&
     provider.name !== "" &&
-    provider?.registryPresent === true &&
-    provider.gatewayPresent === true &&
+    provider?.present === true &&
+    provider.state === "configured" &&
     provider.attached === true &&
     provider.credentialReady === true &&
     credentialResolution?.ok === null &&
     credentialResolution.detail ===
       "probe skipped: the current OpenShell credential revision could not be observed" &&
-    policy?.registryPresent === true &&
+    policy?.present === true &&
     typeof policy.name === "string" &&
     policy.name !== "" &&
-    policy.gatewayPresent === true &&
+    policy.state === "configured" &&
     adapterStatus?.registered === null &&
     adapterStatus.detail ===
       "Adapter inspection was skipped because the current OpenShell credential revision could not be observed."
@@ -470,7 +676,7 @@ export async function confirmHermesMcpRegistrationAfterRestartSettlement(options
 function hermesEntryFromStatus(
   result: McpStatusCommandResult,
   expected: { server: string; url: string; credentialEnvName: string },
-): McpBridgeEntry | null {
+): McpSourceEntry | null {
   try {
     const status = objectValue(JSON.parse(result.stdout) as unknown);
     const provider = objectValue(status?.provider);
@@ -482,9 +688,7 @@ function hermesEntryFromStatus(
       typeof provider?.name !== "string" ||
       provider.name === "" ||
       typeof policy?.name !== "string" ||
-      policy.name === "" ||
-      typeof status.addedAt !== "string" ||
-      status.addedAt === ""
+      policy.name === ""
     ) {
       return null;
     }
@@ -496,7 +700,6 @@ function hermesEntryFromStatus(
       env: [expected.credentialEnvName],
       providerName: provider.name,
       policyName: policy.name,
-      addedAt: status.addedAt,
     };
   } catch {
     return null;

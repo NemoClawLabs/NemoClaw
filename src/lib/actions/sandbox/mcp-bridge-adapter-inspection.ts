@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { McpBridgeEntry } from "../../state/registry";
+import type { McpSourceEntry } from "./mcp-bridge-contracts";
 import { redactBridgeSecretsForDisplay } from "./mcp-bridge-output";
 import type { McpProviderInspectionRuntimeSelection } from "./mcp-bridge-provider-inspection";
 import { executeSandboxCommand, type SandboxCommandResult } from "./process-recovery";
@@ -11,6 +11,7 @@ export type AdapterRegistrationInspection =
   | { state: "error"; detail: string };
 
 export type AdapterMutationOptions = {
+  operationTarget?: import("./mcp-bridge-state").McpOperationTarget;
   force?: boolean;
   bestEffort?: boolean;
   envValues?: Record<string, string>;
@@ -21,7 +22,7 @@ export type AdapterRemovalOutcome = "removed" | "absent" | "unowned";
 
 export function parseAdapterRegistrationInspection(
   result: SandboxCommandResult,
-  entry: McpBridgeEntry,
+  entry: McpSourceEntry,
 ): AdapterRegistrationInspection {
   const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
   if (result.status !== 0) {
@@ -49,7 +50,7 @@ export function parseAdapterRegistrationInspection(
 
 export function inspectAdapterRegistrationCommand(
   sandboxName: string,
-  entry: McpBridgeEntry,
+  entry: McpSourceEntry,
   command: string,
   runtimeSelection: McpProviderInspectionRuntimeSelection,
 ): AdapterRegistrationInspection {

@@ -23,7 +23,6 @@ import { withMcpCredentialOwnershipLock } from "../state/mcp-lifecycle-lock/cred
 import { ROOT } from "../state/paths";
 import {
   forgetExtraProvider,
-  listManagedMcpCredentialReservations,
   recordExtraProvider,
 } from "./global";
 
@@ -60,26 +59,6 @@ function ok(successLines: readonly string[]): CredentialsAddResult {
 
 function fail(failureLines: readonly string[], exitCode = 1): CredentialsAddResult {
   return { exitCode, successLines: [], failureLines };
-}
-
-function managedMcpCollisionFailure(
-  provider: string,
-  credentialKeys: readonly string[],
-  reservations: ReturnType<typeof listManagedMcpCredentialReservations>,
-): CredentialsAddResult | null {
-  for (const credential of credentialKeys) {
-    const collision = reservations.find((reservation) =>
-      reservation.credentialKeys.includes(credential),
-    );
-    if (collision) {
-      return fail([
-        `  Credential key '${credential}' is reserved by managed MCP server '${collision.server}' on sandbox '${collision.sandboxName}'.`,
-        `  Refusing to register provider '${provider}' because registered providers attach during sandbox rebuild.`,
-        "  Use a different credential key, or remove the managed MCP server before retrying.",
-      ]);
-    }
-  }
-  return null;
 }
 
 function typedProviderConfigFailure(type: string, key: string, value: string): string[] | null {
@@ -350,14 +329,6 @@ export async function runCredentialsAddAction(
   const endpointFailure = await providerConfigEndpointFailure(config);
   if (endpointFailure) return fail(endpointFailure);
 
-  const managedMcpReservations = listManagedMcpCredentialReservations();
-  const explicitCollision = managedMcpCollisionFailure(
-    provider,
-    credentials,
-    managedMcpReservations,
-  );
-  if (explicitCollision) return explicitCollision;
-
   const recoveryFailureLines: string[] = [];
   const target = await recoverCredentialGatewayTargetOrExit("mutation", (lines) => {
     recoveryFailureLines.push(...lines);
@@ -375,7 +346,6 @@ export async function runCredentialsAddAction(
   );
   if (providerProfileFailure) return providerProfileFailure;
 
-  let importedCredentialKeys: string[] | null = null;
   if (fromExisting) {
     const inspection = await providerAdapter.inspectProviderProfile({
       target,
@@ -389,18 +359,12 @@ export async function runCredentialsAddAction(
         ...(inspection.error.message ? [`  ${inspection.error.message}`] : []),
       ]);
     }
-    importedCredentialKeys = [...inspection.value.credentialKeys];
   }
 
   return withMcpCredentialOwnershipLock(async () => {
-    const providerCredentialKeys = importedCredentialKeys ?? credentials;
-    const collision = managedMcpCollisionFailure(
-      provider,
-      providerCredentialKeys,
-      listManagedMcpCredentialReservations(),
-    );
-    if (collision) return collision;
-
+    // Registration records this provider as an explicit extra-provider intent.
+    // Rebuild validates that intent against current source-backed MCP entries;
+    // orphaned providers retained by conservative MCP removal are not intent.
     const recordedReservation = recordExtraProvider(provider);
     let keepReservation = false;
     try {

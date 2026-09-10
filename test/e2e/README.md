@@ -134,6 +134,13 @@ It requires every shipped agent once, one candidate revision, one release, and o
 No matching successful run, invalid or duplicated run metadata, or incomplete, duplicated, mixed, or substituted artifact evidence stops before any stock-onboarding consumer starts.
 Manual PR E2E does not fall back to local Dockerfile builds.
 
+To use base images built on the same NVIDIA/NemoClaw PR branch, dispatch `base-image.yaml` from that branch.
+After it succeeds, pass its run ID as `base_image_publication_run_id` to the PR E2E dispatch.
+This option requires an authenticated candidate managed-image catalog and a controller at the latest PR commit.
+The verifier binds the successful run, attempt, source commit, publisher jobs, and current PR identity before downloading the immutable base contract.
+If `managed_image_revision` selects an earlier publication commit, that commit must be an ancestor with unchanged image inputs, including root npm manifests.
+The base-image branch publication updates commit-specific tags; it does not update `latest`.
+
 Unchanged runs pass the selected base revision and complete cohort receipt to every stock-onboarding consumer.
 Changed-input runs pass the authenticated candidate catalog separately to those consumers.
 The candidate CLI artifact cannot contain the catalog.
@@ -182,9 +189,9 @@ This baseline measures only the replaced build step.
 Artifact upload, download, validation, and the dependency on `generate-matrix` add runtime and can affect the workflow critical path.
 Do not use the build-step median to claim savings in runner time or workflow elapsed time.
 
-A manual PR E2E run tests candidate code but executes `.github/workflows/e2e.yaml` from trusted `main`.
-The PR run cannot measure this workflow change before merge.
-After merge, use a passing `main` run and complete these steps:
+The default manual PR E2E dispatch executes `.github/workflows/e2e.yaml` from trusted `main`, so it cannot measure candidate workflow changes before merge.
+The explicit NVIDIA-owned branch-controller mode described above executes the workflow at the latest PR commit and can exercise those changes.
+For the post-merge performance comparison, use a passing `main` run and complete these steps:
 
 1. Match the job selection, runner labels, and first attempt to the baseline.
 2. Record durations for the candidate build, artifact upload, artifact download, combined verification and restore step, job, and workflow.
