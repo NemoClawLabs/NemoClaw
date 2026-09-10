@@ -28,7 +28,8 @@ import {
   isDockerDaemonReachable,
   isSupportedGatewayDockerHost,
 } from "../domain/docker-host";
-import { classifyDockerVersionIdentity } from "../platform";
+import type { DockerAuthorityConflict } from "../platform";
+import { classifyDockerVersionIdentity, observeDockerAuthorityConflict } from "../platform";
 import { resolveOpenshell } from "../readiness/openshell-resolver";
 import {
   MIN_RECOMMENDED_DOCKER_CPUS,
@@ -140,6 +141,13 @@ export interface HostAssessment {
     | "info_unavailable"
     | "version_timeout"
     | "version_unavailable";
+  /**
+   * Set when DOCKER_HOST is unset, the default Docker authority is
+   * unreachable, and the socket fallback met two reachable engines of
+   * different known identities. Detection deliberately selects neither
+   * engine and keeps the unreachable default (#8816, #10253, #10622).
+   */
+  dockerAuthorityConflict?: DockerAuthorityConflict;
   nodeInstalled: boolean;
   openshellInstalled: boolean;
   dockerInfoSummary?: string;
@@ -199,6 +207,10 @@ export interface AssessHostOpts {
   resolveOpenshellImpl?: () => string | null;
   commandExistsImpl?: (commandName: string) => boolean;
   gpuProbeImpl?: () => boolean;
+  observeDockerAuthorityConflictImpl?: (opts: {
+    env: NodeJS.ProcessEnv;
+    platform: NodeJS.Platform;
+  }) => DockerAuthorityConflict | null;
 }
 
 function buildCommandVArgv(commandName: string): readonly string[] {
@@ -550,6 +562,27 @@ function parseSystemctlState(value = ""): boolean | null {
   return null;
 }
 
+/**
+ * Pick the Docker authority conflict observer for one assessment. The default
+ * observer probes this host's own sockets, so it applies only when the
+ * assessment probes the local host itself: injected Docker evidence or a
+ * command transport (tests, a remote host) gets no observer unless the caller
+ * injects one (#10622).
+ */
+export function resolveDockerAuthorityConflictObserver(
+  opts: AssessHostOpts,
+): AssessHostOpts["observeDockerAuthorityConflictImpl"] {
+  return (
+    opts.observeDockerAuthorityConflictImpl ??
+    (opts.dockerInfoOutput === undefined &&
+    opts.runCaptureImpl === undefined &&
+    opts.runCaptureExImpl === undefined
+      ? observeDockerAuthorityConflict
+      : undefined)
+  );
+}
+
+/** Assess the host: Docker, GPU, OpenShell, and the advisories they imply. */
 export function assessHost(opts: AssessHostOpts = {}): HostAssessment {
   const platform = opts.platform ?? process.platform;
   const env = opts.env ?? process.env;
@@ -603,6 +636,21 @@ export function assessHost(opts: AssessHostOpts = {}): HostAssessment {
     dockerReachable = true;
     dockerRunning = true;
   }
+
+  // An unreachable default authority with two reachable engines of different
+  // identities is an authority conflict (#10622). It is observed only when
+  // DOCKER_HOST is unset, because a set DOCKER_HOST is honoured before any
+  // socket probe.
+  const observeConflict = resolveDockerAuthorityConflictObserver(opts);
+  const dockerAuthorityConflict =
+    observeConflict !== undefined &&
+    dockerInstalled &&
+    !dockerHostInvalid &&
+    !dockerReachable &&
+    dockerProbeIssue === undefined &&
+    !env.DOCKER_HOST
+      ? (observeConflict({ env, platform }) ?? undefined)
+      : undefined;
 
   // Capture the docker-compat engine banner so Podman fronting the Docker CLI
   // socket is reclassified below. Only probed when the daemon is reachable so a
@@ -745,6 +793,7 @@ export function assessHost(opts: AssessHostOpts = {}): HostAssessment {
     dockerRunning,
     dockerReachable,
     dockerProbeIssue,
+    dockerAuthorityConflict,
     nodeInstalled,
     openshellInstalled,
     dockerInfoSummary: parseDockerInfoSummary(dockerInfoOutput),
