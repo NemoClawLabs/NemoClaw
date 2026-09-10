@@ -423,6 +423,56 @@ describe.skipIf(process.platform !== "linux")("CI failure classifier process", (
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout).result).toBe("unclassified");
   });
+  test("does not classify an unrelated job that mentions npm audit", () => {
+    const item = fixture(
+      "The documentation mentions npm audit.\nProcess completed with exit code 1",
+    );
+    item.env.JOB_NAME = "Documentation checks";
+    const result = run(item.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).categories).not.toContain("reviewed-npm-audit");
+  });
+  test.each([
+    ["threshold failure", "CLI tests", "npm audit threshold failed"],
+    ["unused exception", "Dependency policy", "unused npm audit exceptions: GHSA-example"],
+    ["unaccepted advisory", "Release policy", "1 unaccepted at or above high"],
+  ])("classifies an npm audit failure from %s", (_caseName, jobName, log) => {
+    const item = fixture(log);
+    item.env.JOB_NAME = jobName;
+    const result = run(item.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).categories).toContain("reviewed-npm-audit");
+  });
+  test("does not classify an npm audit job without audit-policy evidence", () => {
+    const item = fixture("The operation timed out");
+    item.env.JOB_NAME = "PR npm audit";
+    const result = run(item.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).categories).not.toContain("reviewed-npm-audit");
+  });
+  test.each([
+    ["archive integrity mismatch", "ERROR: npm@12.0.2 archive integrity mismatch."],
+    [
+      "archive version mismatch",
+      "ERROR: npm archive version 12.0.1 does not match reviewed npm@12.0.2.",
+    ],
+    [
+      "archive package metadata",
+      "ERROR: npm@12.0.2 archive package/package.json is missing or invalid.",
+    ],
+    ["invalid archive identity", "npm audit configuration has an invalid npmArchiveSha256"],
+  ])("classifies a reviewed npm bootstrap %s separately", (_caseName, log) => {
+    const item = fixture(log);
+    item.env.JOB_NAME = "PR npm audit";
+    const result = run(item.env);
+    expect(result.status, result.stderr).toBe(0);
+    const value = JSON.parse(result.stdout);
+    expect(value.categories).toContain("reviewed-npm-bootstrap");
+    expect(value.categories).not.toContain("reviewed-npm-audit");
+    expect(value.nextActions).toContain(
+      "Inspect the pinned npm identity and downloaded archive; do not change the advisory exception baseline.",
+    );
+  });
   test.each(REDACTION_CASES)(
     "redacts a standalone %s from returned process logs",
     (_name, secret, exposed) => {
