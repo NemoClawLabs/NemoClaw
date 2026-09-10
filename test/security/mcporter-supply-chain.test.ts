@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -51,8 +53,7 @@ const reviewedAuditDriver = fs.readFileSync(
 function extractIntegrityGate(contents: string): string {
   const startMarker = 'MCPORTER_EXPECTED_INTEGRITY=""';
   const start = contents.indexOf(startMarker);
-  const helperMarker =
-    "node /scripts/lib/reviewed-npm-archive.mts --verify-only";
+  const helperMarker = "node /scripts/lib/reviewed-npm-archive.mts --verify-only";
   const helperStart = contents.indexOf(helperMarker, start);
   const helperEndMarker = '--label "mcporter ${MCPORTER_VERSION}"';
   const helperEnd = contents.indexOf(helperEndMarker, helperStart) + helperEndMarker.length;
@@ -199,6 +200,9 @@ describe("mcporter image supply-chain controls", () => {
       flattenedContents.includes(
         "COPY scripts/lib/reviewed-npm-archive.mts scripts/lib/bundled-npm-package.mts scripts/lib/reviewed-npm-audit.mts scripts/lib/openclaw-npm-remediation.mts /scripts/lib/",
       ) ||
+        flattenedContents.includes(
+          "COPY scripts/lib/reviewed-npm-archive.mts scripts/lib/bundled-npm-package.mts scripts/lib/reviewed-npm-audit.mts scripts/lib/npm-audit-receipt.mts scripts/lib/openclaw-npm-remediation.mts scripts/lib/patch-bundled-npm-ip-address.mts scripts/lib/reviewed-npm-identity.mts /scripts/lib/",
+        ) ||
         contents.includes(
           "COPY scripts/lib/reviewed-npm-audit.mts /scripts/lib/reviewed-npm-audit.mts",
         ),
@@ -213,15 +217,14 @@ describe("mcporter image supply-chain controls", () => {
     expect(contents).toContain(
       "--mount=type=secret,id=nemoclaw-mcporter-audit-raw-report,required=false",
     );
-    expect(flattenedContents).toContain(
-      "node /scripts/lib/npm-audit-receipt.mts --receipt",
-    );
+    expect(flattenedContents).toContain("node /scripts/lib/npm-audit-receipt.mts --receipt");
     expect(flattenedContents).toContain(
       "--package-json /usr/local/lib/nemoclaw/mcporter-runtime/package.json --package-lock /usr/local/lib/nemoclaw/mcporter-runtime/package-lock.json --raw-report",
     );
     expect(auditReceiptInvocation).toContain(
-      "--exceptions /scripts/npm-audit-exceptions.json --graph mcporter-runtime --audit-config /scripts/reviewed-npm-audit.json --registry https://registry.yarnpkg.com --threshold high --legacy-npmjs true",
+      "--exceptions /scripts/npm-audit-exceptions.json --graph mcporter-runtime --audit-config /scripts/reviewed-npm-audit.json --registry https://registry.yarnpkg.com --threshold high",
     );
+    expect(auditReceiptInvocation).toContain("--legacy-npmjs true");
     expect(expectedReviewedNpmVersion).toMatch(/^[0-9]+\.[0-9]+\.[0-9]+$/);
     expect(auditReceiptInvocation).not.toContain("--npm-version");
     expect(contents).not.toContain("--raw-copy");
@@ -235,14 +238,44 @@ describe("mcporter image supply-chain controls", () => {
     expect(contents).toContain("StreamableHTTPServerTransport");
   });
 
-  it("copies the cached base-image audit report only after receipt verification succeeds", () => {
-    const contents = fs.readFileSync(path.join(repoRoot, "Dockerfile.base"), "utf8");
-    const flattenedContents = contents.replace(/\\\s*\n/g, " ").replace(/\s+/g, " ");
-
-    expect(flattenedContents).toContain(
-      '--result /tmp/mcporter-npm-audit-policy.json && cp "$MCPORTER_RAW_REPORT" /tmp/mcporter-npm-audit.json;',
-    );
-  });
+  it.each([
+    { verificationStatus: 0, copied: true },
+    { verificationStatus: 1, copied: false },
+  ])(
+    "copies the cached audit report only after successful verification (status $verificationStatus)",
+    ({ verificationStatus, copied }) => {
+      const contents = fs.readFileSync(path.join(repoRoot, "Dockerfile.base"), "utf8");
+      const start = contents.indexOf("node /scripts/lib/npm-audit-receipt.mts");
+      const end = contents.indexOf("; \\\n", start);
+      assert.ok(start >= 0 && end > start, "Cached audit verification branch is missing");
+      const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "mcporter-audit-copy-"));
+      try {
+        const source = path.join(fixture, "raw-report.json");
+        const destination = path.join(fixture, "copied-report.json");
+        fs.writeFileSync(source, '{"metadata":{"vulnerabilities":{}}}\n');
+        const command = contents
+          .slice(start, end)
+          .replace("/tmp/mcporter-npm-audit.json", '"$MCPORTER_COPIED_REPORT"');
+        const result = spawnSync(
+          "/bin/bash",
+          ["-e", "-c", `node() { return "$VERIFICATION_STATUS"; }\n${command}`],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              MCPORTER_RAW_REPORT: source,
+              MCPORTER_COPIED_REPORT: destination,
+              VERIFICATION_STATUS: String(verificationStatus),
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(verificationStatus);
+        expect(fs.existsSync(destination)).toBe(copied);
+      } finally {
+        fs.rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("verifies the exact committed dependency graph signatures in trusted CI (#8925)", () => {
     const graph = reviewedAuditConfig.lockedGraphs.find(

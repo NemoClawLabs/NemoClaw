@@ -77,10 +77,13 @@ const trustedPrActionPaths = {
   cliCoverageMerge: "./.trusted-ci-actions/.github/actions/ci-cli-coverage-merge",
   pluginCoverage: "./.trusted-ci-actions/.github/actions/ci-plugin-coverage",
   installerIntegration: "./.trusted-ci-actions/.github/actions/ci-installer-integration",
+  reviewedNpmAudit:
+    "NVIDIA/NemoClaw/.github/actions/ci-reviewed-npm-audit@7363df49a5f25b0dd1c20c80905917c31760a27e",
 } as const;
 
 const trustedCheckoutAction = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 const trustedSetupNodeAction = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020";
+const reviewedNpmAction = "./.github/actions/setup-reviewed-npm";
 const trustedActionDirs = [
   ".github/actions/ci-static-checks",
   ".github/actions/ci-build-typecheck",
@@ -507,7 +510,11 @@ describe("pull request and main workflow contracts", () => {
     ).toBe(true);
     expect(job.needs).toBe("changes");
     expect(job.if).toBe("needs.changes.outputs.hugging_face_models == 'true'");
-    expect(stepUses(job)).toEqual([trustedCheckoutAction, trustedSetupNodeAction]);
+    expect(stepUses(job)).toEqual([
+      trustedCheckoutAction,
+      trustedSetupNodeAction,
+      reviewedNpmAction,
+    ]);
     expect(requiredWorkflowStep(job, "Checkout").with?.["persist-credentials"]).toBe(false);
     expect(requiredWorkflowStep(job, "Install dependencies").run).toBe(
       "npm ci --ignore-scripts --no-audit --no-fund",
@@ -639,6 +646,9 @@ describe("pull request and main workflow contracts", () => {
 
   // source-shape-contract: security -- The PR workflow must select an exact base-controlled package run before publishing its archive internally
   it("passes only the base-packaged SDK archive to pull request dependency jobs", () => {
+    expect(
+      requiredWorkflowStep(prWorkflow.jobs["build-typecheck"], "Install dependencies").env,
+    ).toEqual({ NPM_CONFIG_ALLOW_REMOTE: "root" });
     const packageJob = prWorkflow.jobs["openshell-sdk-package"];
     expect(packageJob["timeout-minutes"]).toBe(10);
     expect(packageJob.permissions).toEqual({ actions: "read", contents: "read" });
@@ -987,9 +997,7 @@ describe("pull request and main workflow contracts", () => {
       NEMOCLAW_OPEN_SHELL_SDK_INCLUDE_REPLACEMENT: "1",
       NODE_AUTH_TOKEN: "${{ github.token }}",
     });
-    expect(fetch.run).toContain(
-      "node scripts/checks/package-openshell-sdk-for-pr.mts",
-    );
+    expect(fetch.run).toContain("node scripts/checks/package-openshell-sdk-for-pr.mts");
     expect(fetch.run).toContain("artifact_path=");
     expect(
       (sdkPackageJob.steps ?? [])

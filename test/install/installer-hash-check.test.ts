@@ -37,8 +37,10 @@ const INSTALLER_TEMPLATE = fs.readFileSync(
   path.join(REPO_ROOT, "scripts/install-openshell.sh"),
   "utf8",
 );
+// Historical release-table scenarios use the already-trusted Node 22 template.
+// The live installer-hash check validates the current production bootstrap.
 const BREV_TEMPLATE = fs.readFileSync(
-  path.join(REPO_ROOT, "scripts/brev-launchable-ci-cpu.sh"),
+  path.join(REPO_ROOT, "test/fixtures/brev-node22-bootstrap.sh"),
   "utf8",
 );
 const ASSET_DIGESTS = V0072_CONSUMED_ASSET_DIGESTS;
@@ -693,10 +695,7 @@ function renderInstallerTemplate(openshellVersion: string, pinFunction: string):
       : removeV00106OperationalTrust(withPinFunction);
   const releaseTemplate =
     openshellVersion === "0.0.116"
-      ? operationalTemplate.replace(
-          STABLE_GNU_SANDBOX_SELECTOR,
-          STABLE_MUSL_SANDBOX_SELECTOR,
-        )
+      ? operationalTemplate.replace(STABLE_GNU_SANDBOX_SELECTOR, STABLE_MUSL_SANDBOX_SELECTOR)
       : operationalTemplate;
   const sandboxFunctionStart = releaseTemplate.indexOf("pinned_sandbox_build_version() {");
   const sandboxFunctionEnd = releaseTemplate.indexOf(

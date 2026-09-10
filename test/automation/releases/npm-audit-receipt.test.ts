@@ -17,7 +17,9 @@ import {
 const NOW = new Date("2026-09-04T00:00:00.000Z");
 const inputs = {
   graphId: "mcporter-runtime",
-  npmVersion: "10.9.4",
+  npmIntegrity:
+    "sha512-uIXokLlBj6FpNUTQX1PmT5pz7BlIN9QlixX+zdaSNHsd0qUXsbDLr50xzY6Sw7cJVr0uzHKDOle0swmPW/p5Qw==",
+  npmVersion: "12.0.2",
   exceptionPolicy: '{"schemaVersion":1,"exceptions":[]}\n',
   severityThreshold: "high",
   packageJson: "package",
@@ -34,6 +36,7 @@ function receipt(createdAt = NOW) {
     createdAt,
     exceptionPolicySha256: sha256(inputs.exceptionPolicy),
     graphId: inputs.graphId,
+    npmIntegrity: inputs.npmIntegrity,
     npmVersion: inputs.npmVersion,
     packageJson: inputs.packageJson,
     packageLock: inputs.packageLock,
@@ -173,7 +176,7 @@ describe("reviewed npm audit receipt", () => {
         fs.writeFileSync(path.join(root, "raw.json"), inputs.rawResponse);
         fs.writeFileSync(
           path.join(root, "reviewed-npm-audit.json"),
-          JSON.stringify({ npmVersion: inputs.npmVersion }),
+          JSON.stringify({ npmIntegrity: inputs.npmIntegrity, npmVersion: inputs.npmVersion }),
         );
         const auditReceipt = legacy
           ? {
@@ -231,7 +234,7 @@ describe("reviewed npm audit receipt", () => {
       fs.writeFileSync(path.join(root, "raw.json"), inputs.rawResponse);
       fs.writeFileSync(
         path.join(root, "reviewed-npm-audit.json"),
-        JSON.stringify({ npmVersion: inputs.npmVersion }),
+        JSON.stringify({ npmIntegrity: inputs.npmIntegrity, npmVersion: inputs.npmVersion }),
       );
       fs.writeFileSync(path.join(root, "receipt.json"), canonicalAuditReceipt(receipt(new Date())));
 
@@ -269,6 +272,57 @@ describe("reviewed npm audit receipt", () => {
       expect(result.stderr).toContain("unexpected or missing keys");
       expect(fs.existsSync(resultFile)).toBe(false);
       expect(fs.existsSync(rawCopyFile)).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it("rejects a receipt produced by a different npm artifact before writing a result", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "receipt-npm-identity-"));
+    const resultFile = path.join(root, "policy.json");
+    try {
+      fs.writeFileSync(path.join(root, "package.json"), inputs.packageJson);
+      fs.writeFileSync(path.join(root, "package-lock.json"), inputs.packageLock);
+      fs.writeFileSync(path.join(root, "exceptions.json"), inputs.exceptionPolicy);
+      fs.writeFileSync(path.join(root, "raw.json"), inputs.rawResponse);
+      fs.writeFileSync(
+        path.join(root, "reviewed-npm-audit.json"),
+        JSON.stringify({ npmIntegrity: inputs.npmIntegrity, npmVersion: "11.18.0" }),
+      );
+      fs.writeFileSync(path.join(root, "receipt.json"), canonicalAuditReceipt(receipt(new Date())));
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          path.join(import.meta.dirname, "../../../scripts/lib/npm-audit-receipt.mts"),
+          "--receipt",
+          path.join(root, "receipt.json"),
+          "--package-json",
+          path.join(root, "package.json"),
+          "--package-lock",
+          path.join(root, "package-lock.json"),
+          "--raw-report",
+          path.join(root, "raw.json"),
+          "--exceptions",
+          path.join(root, "exceptions.json"),
+          "--graph",
+          inputs.graphId,
+          "--audit-config",
+          path.join(root, "reviewed-npm-audit.json"),
+          "--registry",
+          inputs.registryOrigin,
+          "--threshold",
+          inputs.severityThreshold,
+          "--result",
+          resultFile,
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        "receipt identity does not match expected graph and npm artifact",
+      );
+      expect(fs.existsSync(resultFile)).toBe(false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
