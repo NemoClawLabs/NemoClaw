@@ -297,6 +297,43 @@ function proxySnapshot(
 }
 
 describe("config export source verification (#10938)", () => {
+  it.each([
+    { label: "default proxy", environment: {}, expected: {} },
+    {
+      label: "managed proxy",
+      environment: { NEMOCLAW_PROXY_HOST: "proxy.internal", NEMOCLAW_PROXY_PORT: "3129" },
+      expected: { proxy: { host: "proxy.internal", port: 3129 } },
+    },
+  ])("exports retained OpenClaw telemetry with $label", ({ environment, expected }) => {
+    const value = snapshot({
+      registry: entry({
+        workload: managedWorkload(
+          profileInput({
+            environment: {
+              NEMOCLAW_OPENCLAW_OTEL: "1",
+              NEMOCLAW_OPENCLAW_OTEL_ENDPOINT: "http://host.openshell.internal:4318",
+              NEMOCLAW_OPENCLAW_OTEL_SERVICE_NAME: "research-assistant",
+              NEMOCLAW_OPENCLAW_OTEL_SAMPLE_RATE: "0.5",
+              ...environment,
+            },
+          }),
+        ),
+      }),
+    });
+
+    expect(verifiedSource(verify(value))).toMatchObject({
+      ...expected,
+      observability: {
+        otlp: {
+          enabled: true,
+          endpoint: "http://host.openshell.internal:4318",
+          serviceName: "research-assistant",
+          sampleRate: 0.5,
+        },
+      },
+    });
+  });
+
   it.each([false, true])(
     "verifies Brave with optional inference attachment %s (#10904)",
     (attached) => {

@@ -26,6 +26,7 @@ import {
   isValidNemoClawRuntimeProvider,
   isValidNemoClawSandboxName,
   isSupportedInferenceApi,
+  NemoClawOpenClawObservabilitySchema,
 } from "../../config/model";
 import { fingerprintOpenShellSandboxId } from "../sandbox/openshell-identity";
 import { ExportSourceValuesSchema } from "./export-evidence";
@@ -88,7 +89,15 @@ const EXPORT_AGENT_PROFILE_PROJECTIONS: Record<
 
 type VerifiedExportSourceData = Pick<
   VerifiedExportSource,
-  "agent" | "gateway" | "inference" | "policy" | "proxy" | "runtime" | "sandboxName" | "webSearch"
+  | "agent"
+  | "gateway"
+  | "inference"
+  | "observability"
+  | "policy"
+  | "proxy"
+  | "runtime"
+  | "sandboxName"
+  | "webSearch"
 >;
 
 function verifiedExportSource(data: VerifiedExportSourceData): VerifiedExportSource {
@@ -401,6 +410,16 @@ function expectedManagedStartupProfile(entry: ObservedExportRegistry): ManagedSt
   }).profile;
 }
 
+function exportedObservability(
+  profile: ManagedStartupProfile,
+): VerifiedExportSource["observability"] {
+  if (profile.agentConfig.agent !== "openclaw" || !profile.agentConfig.otel.enabled)
+    return undefined;
+  const { enabled, endpointUrl, serviceName, sampleRate } = profile.agentConfig.otel;
+  const value = { otlp: { enabled, endpoint: endpointUrl, serviceName, sampleRate } };
+  return Check(NemoClawOpenClawObservabilitySchema, value) ? value : undefined;
+}
+
 function classifyManagedStartupProfile(
   entry: ObservedExportRegistry,
   profile: ManagedStartupProfile,
@@ -424,6 +443,14 @@ function classifyManagedStartupProfile(
         "The managed startup profile cannot be matched to the registered inference selection.",
       ),
     ];
+  }
+  const observability = exportedObservability(profile);
+  if (observability && expected.agentConfig.agent === "openclaw") {
+    const { endpoint: endpointUrl, ...telemetry } = observability.otlp;
+    expected = {
+      ...expected,
+      agentConfig: { ...expected.agentConfig, otel: { ...telemetry, endpointUrl } },
+    };
   }
   const findings: ExportFinding[] = [];
   if (!hasEqualJsonStructure(profile.inference, expected.inference)) {
@@ -882,6 +909,24 @@ function inspectWorkload(entry: ObservedExportRegistry) {
   return { authority, findings };
 }
 
+function exportInferenceValues(snapshot: QualifiedExportSnapshot) {
+  const selected = normalizeInferenceSelection(snapshot.registry);
+  return snapshot.inference.topology === "managed"
+    ? {
+        provider: selected.provider,
+        model: selected.model,
+        api: selected.preferredInferenceApi,
+        serving: snapshot.inference.managedServing?.serving,
+      }
+    : {
+        provider: selected.provider,
+        model: selected.model,
+        api: selected.preferredInferenceApi,
+        endpoint: selected.endpointUrl,
+        ...(selected.credentialEnv === null ? {} : { credentialEnv: selected.credentialEnv }),
+      };
+}
+
 function completeVerifiedSource(
   requestedSandboxName: string,
   snapshot: QualifiedExportSnapshot,
@@ -889,9 +934,10 @@ function completeVerifiedSource(
   policy: CanonicalExportPolicy,
 ): ExportSourceVerificationResult {
   const entry = snapshot.registry;
-  const selected = normalizeInferenceSelection(entry);
+  const observability = authority ? exportedObservability(authority.profile) : undefined;
   const proxy = authority?.profile.proxy;
   const values = {
+    ...(observability ? { observability } : {}),
     sandboxName: requestedSandboxName,
     agent: entry.agent,
     ...(hasBraveSearch(entry)
@@ -908,21 +954,7 @@ function completeVerifiedSource(
     ...(proxy && !hasEqualJsonStructure(proxy, expectedManagedStartupProfile(entry).proxy)
       ? { proxy: { host: proxy.managedHost, port: proxy.managedPort } }
       : {}),
-    inference:
-      snapshot.inference.topology === "managed"
-        ? {
-            provider: selected.provider,
-            model: selected.model,
-            api: selected.preferredInferenceApi,
-            serving: snapshot.inference.managedServing?.serving,
-          }
-        : {
-            provider: selected.provider,
-            model: selected.model,
-            api: selected.preferredInferenceApi,
-            endpoint: selected.endpointUrl,
-            ...(selected.credentialEnv === null ? {} : { credentialEnv: selected.credentialEnv }),
-          },
+    inference: exportInferenceValues(snapshot),
   };
   if (!Check(ExportSourceValuesSchema, values)) {
     return {
