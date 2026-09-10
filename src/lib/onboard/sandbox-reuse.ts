@@ -106,6 +106,7 @@ export interface ReusedSandboxDashboardStateInput {
     chatUiUrl: string,
     options?: {
       reuseExistingOpenClawForward?: boolean;
+      recordDashboardBind?: boolean;
       revalidateSandboxIdentity?: (operation: string) => void;
     },
   ): number;
@@ -144,18 +145,21 @@ export function applyReusedSandboxDashboardState(
       `Sandbox '${input.sandboxName}' was created without remote dashboard exposure. Re-run onboarding with NEMOCLAW_DASHBOARD_BIND=0.0.0.0 and --recreate-sandbox before opening a remote bind.`,
     );
   }
-  input.revalidateSandboxIdentity?.(
-    `restore dashboard state for sandbox '${input.sandboxName}'`,
-  );
+  input.revalidateSandboxIdentity?.(`restore dashboard state for sandbox '${input.sandboxName}'`);
   const reuseExistingOpenClawForward = input.agent == null || input.agent.name === "openclaw";
-  const dashboardPort = manageDashboard
-    ? input.ensureDashboardForward(input.sandboxName, input.chatUiUrl, {
-        ...(reuseExistingOpenClawForward ? { reuseExistingOpenClawForward: true } : {}),
-        ...(input.revalidateSandboxIdentity
-          ? { revalidateSandboxIdentity: input.revalidateSandboxIdentity }
-          : {}),
-      })
-    : 0;
+  // The launcher records the bind of the dashboard forward it starts and
+  // leaves the record alone when it keeps an existing owned forward (#10861),
+  // so this path writes no bind of its own.
+  let dashboardPort = 0;
+  if (manageDashboard) {
+    dashboardPort = input.ensureDashboardForward(input.sandboxName, input.chatUiUrl, {
+      recordDashboardBind: true,
+      ...(reuseExistingOpenClawForward ? { reuseExistingOpenClawForward: true } : {}),
+      ...(input.revalidateSandboxIdentity
+        ? { revalidateSandboxIdentity: input.revalidateSandboxIdentity }
+        : {}),
+    });
+  }
   const chatUiUrl = manageDashboard ? `http://127.0.0.1:${dashboardPort}` : input.chatUiUrl;
   if (manageDashboard) {
     input.revalidateSandboxIdentity?.(`record dashboard URL for sandbox '${input.sandboxName}'`);
