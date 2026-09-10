@@ -454,6 +454,7 @@ RUN pip3 install --no-cache-dir --break-system-packages "uv==${UV_VERSION}" \
 # Upstream tests are not part of the production runtime and can contain
 # intentionally hostile security-test fixtures. Remove them in the extraction
 # RUN so their bytes never enter a published image layer.
+# Redact the bundled docs search key in that RUN as well.
 COPY agents/hermes/security-dependencies.patch /tmp/hermes-security-dependencies.patch
 COPY agents/hermes/agent-browser-runtime/package.json \
     agents/hermes/agent-browser-runtime/package-lock.json \
@@ -469,6 +470,8 @@ RUN mkdir -p /opt/hermes \
     && sha256sum -c /tmp/hermes.tar.gz.sha256 \
     && tar -xzf /tmp/hermes.tar.gz -C /opt/hermes --strip-components=1 \
     && rm -rf /opt/hermes/tests \
+    && sed -i -E "/^[[:space:]]*apiKey:/s/'[^']*'/'REDACTED'/" /opt/hermes/website/docusaurus.config.ts \
+    && grep -Fq "apiKey: 'REDACTED'," /opt/hermes/website/docusaurus.config.ts \
     && printf '%s  %s\n' \
         "$NEMOCLAW_HERMES_RUNTIME_BOUNDARIES_PATCH_SHA256" /tmp/hermes-runtime-boundaries.patch \
         "$NEMOCLAW_HERMES_SECURE_DIR_PATCH_SHA256" /tmp/hermes-secure-dir-skip-chmod.patch \
