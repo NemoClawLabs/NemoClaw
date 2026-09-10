@@ -94,6 +94,7 @@ type VerifiedExportSourceData = Pick<
   | "execution"
   | "gateway"
   | "inference"
+  | "interfaces"
   | "policy"
   | "proxy"
   | "runtime"
@@ -204,7 +205,7 @@ function classifyExcludedCapabilities(entry: ObservedExportRegistry): ExportFind
     ],
     [
       "spec.sandboxes[].agents[0].dashboard",
-      entry.dashboardRemoteBindPrepared,
+      entry.agent !== "openclaw" && entry.dashboardRemoteBindPrepared,
       "remote dashboard exposure",
     ],
   ];
@@ -406,6 +407,48 @@ function expectedManagedStartupProfile(entry: ObservedExportRegistry): ManagedSt
   }).profile;
 }
 
+function projectDashboard(profile: ManagedStartupProfile): VerifiedExportSource["interfaces"] {
+  if (profile.dashboard.agent !== "openclaw") return undefined;
+  const dashboard = {
+    ...(profile.dashboard.port === 18_789 ? {} : { port: profile.dashboard.port }),
+    ...(profile.dashboard.bindAddress === "127.0.0.1"
+      ? {}
+      : { bind: profile.dashboard.bindAddress }),
+  };
+  return Object.keys(dashboard).length === 0 ? undefined : { dashboard };
+}
+
+function classifyDashboard(
+  entry: ObservedExportRegistry,
+  profile: ManagedStartupProfile,
+): ExportFinding[] {
+  const dashboard = profile.dashboard;
+  if (dashboard.agent !== "openclaw") return [];
+  const remote = dashboard.bindAddress === "0.0.0.0";
+  const legacyDefault = entry.dashboardPort === undefined && dashboard.port === 18_789 && !remote;
+  if (entry.dashboardPort !== dashboard.port && !legacyDefault) {
+    return [
+      finding(
+        "spec.sandboxes[].agents[].interfaces.dashboard.port",
+        entry.dashboardPort === undefined ? "missing-provenance" : "drifted",
+        "The persisted dashboard port must match the managed startup profile.",
+      ),
+    ];
+  }
+  const prepared = entry.dashboardRemoteBindPrepared;
+  const preparationMatches = remote ? prepared === true : [undefined, false].includes(prepared);
+  if (!preparationMatches) {
+    return [
+      finding(
+        "spec.sandboxes[].agents[].interfaces.dashboard.bind",
+        remote ? "missing-provenance" : "drifted",
+        "Dashboard remote-bind preparation must match the managed startup profile.",
+      ),
+    ];
+  }
+  return [];
+}
+
 function projectAgentSettings(profile: ManagedStartupProfile, defaults: ManagedStartupProfile) {
   if (profile.agentConfig.agent !== "openclaw" || defaults.agentConfig.agent !== "openclaw") {
     return {};
@@ -487,21 +530,40 @@ function supportedAgentSettingsProfile(
   };
 }
 
+function supportedHostProfile(
+  profile: ManagedStartupProfile,
+  expected: ManagedStartupProfile,
+): ManagedStartupProfile {
+  const projected = {
+    ...expected,
+    proxy: {
+      ...expected.proxy,
+      managedHost: profile.proxy.managedHost,
+      managedPort: profile.proxy.managedPort,
+    },
+  };
+  if (profile.dashboard.agent !== "openclaw") return projected;
+  const { port, bindAddress } = profile.dashboard;
+  return {
+    ...projected,
+    dashboard: {
+      agent: "openclaw",
+      mode: bindAddress === "0.0.0.0" ? "remote" : "loopback",
+      url: `http://127.0.0.1:${port}`,
+      port,
+      bindAddress,
+      wslExposure: false,
+    },
+  };
+}
+
 function classifyManagedStartupProfile(
   entry: ObservedExportRegistry,
   profile: ManagedStartupProfile,
 ): ExportFinding[] {
   let expected: ManagedStartupProfile;
   try {
-    expected = expectedManagedStartupProfile(entry);
-    expected = {
-      ...expected,
-      proxy: {
-        ...expected.proxy,
-        managedHost: profile.proxy.managedHost,
-        managedPort: profile.proxy.managedPort,
-      },
-    };
+    expected = supportedHostProfile(profile, expectedManagedStartupProfile(entry));
   } catch {
     return [
       finding(
@@ -511,7 +573,10 @@ function classifyManagedStartupProfile(
       ),
     ];
   }
-  const findings = classifyReasoningAgreement(entry, profile);
+  const findings = [
+    ...classifyDashboard(entry, profile),
+    ...classifyReasoningAgreement(entry, profile),
+  ];
   if (entry.servingProfileProvenance?.preset.id !== EXPORTED_VLLM_PROFILE_ID) {
     const supported = supportedAgentSettingsProfile(profile, expected);
     if (!supported) {
@@ -1002,6 +1067,21 @@ function projectVerifiedInference(
       };
 }
 
+function projectHostSettings(
+  entry: ObservedExportRegistry,
+  authority: NonNullable<ReturnType<typeof readManagedWorkloadAuthority>> | null,
+) {
+  if (!authority) return {};
+  const interfaces = projectDashboard(authority.profile);
+  const proxy = authority.profile.proxy;
+  return {
+    ...(interfaces ? { interfaces } : {}),
+    ...(!hasEqualJsonStructure(proxy, expectedManagedStartupProfile(entry).proxy)
+      ? { proxy: { host: proxy.managedHost, port: proxy.managedPort } }
+      : {}),
+  };
+}
+
 function completeVerifiedSource(
   requestedSandboxName: string,
   snapshot: QualifiedExportSnapshot,
@@ -1014,7 +1094,6 @@ function completeVerifiedSource(
     authority && snapshot.inference.topology !== "managed"
       ? projectAgentSettings(authority.profile, expectedManagedStartupProfile(entry))
       : {};
-  const proxy = authority?.profile.proxy;
   const values = {
     sandboxName: requestedSandboxName,
     agent: entry.agent,
@@ -1030,9 +1109,7 @@ function completeVerifiedSource(
       : {}),
     runtime: { provider: entry.openshellDriver, imageRef: authority?.receipt.reference },
     gateway: { name: snapshot.gateway.name, port: snapshot.gateway.port },
-    ...(proxy && !hasEqualJsonStructure(proxy, expectedManagedStartupProfile(entry).proxy)
-      ? { proxy: { host: proxy.managedHost, port: proxy.managedPort } }
-      : {}),
+    ...projectHostSettings(entry, authority),
     inference: projectVerifiedInference(snapshot, selected, settings),
   };
   if (!Check(ExportSourceValuesSchema, values)) {

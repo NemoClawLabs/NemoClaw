@@ -331,20 +331,50 @@ const NemoClawInferenceRouteConfigSchema = Type.Object(
   { additionalProperties: false },
 );
 
-const NemoClawAgentConfigSchema = Type.Object(
+/** Retained OpenClaw dashboard settings; absent leaves keep the managed defaults. */
+export const NemoClawDashboardConfigSchema = Type.Object(
   {
-    name: LocalResourceNameSchema,
-    type: NemoClawAgentTypeSchema,
-    execution: Type.Optional(NemoClawAgentExecutionSchema),
-    inference: Type.Object(
-      {
-        routes: Type.Array(NemoClawInferenceRouteConfigSchema, { minItems: 1 }),
-      },
-      { additionalProperties: false },
+    port: Type.Optional(
+      Type.Integer({
+        minimum: 1024,
+        maximum: 65_535,
+        // Managed OpenClaw dashboards cannot use the reserved Hermes API range.
+        not: { minimum: 8642, maximum: 8652 },
+      }),
     ),
+    bind: Type.Optional(Type.Union([Type.Literal("127.0.0.1"), Type.Literal("0.0.0.0")])),
   },
+  { additionalProperties: false, minProperties: 1 },
+);
+
+export const NemoClawAgentInterfacesSchema = Type.Object(
+  { dashboard: NemoClawDashboardConfigSchema },
   { additionalProperties: false },
 );
+
+const nemoClawAgentFields = {
+  name: LocalResourceNameSchema,
+  execution: Type.Optional(NemoClawAgentExecutionSchema),
+  inference: Type.Object(
+    { routes: Type.Array(NemoClawInferenceRouteConfigSchema, { minItems: 1 }) },
+    { additionalProperties: false },
+  ),
+};
+
+const NemoClawAgentConfigSchema = Type.Union([
+  Type.Object(
+    {
+      ...nemoClawAgentFields,
+      type: Type.Literal("openclaw"),
+      interfaces: Type.Optional(NemoClawAgentInterfacesSchema),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { ...nemoClawAgentFields, type: Type.Literal("hermes") },
+    { additionalProperties: false },
+  ),
+]);
 
 const NemoClawManagedImageConfigSchema = Type.Object(
   { ref: ImmutableImageReferenceSchema },
