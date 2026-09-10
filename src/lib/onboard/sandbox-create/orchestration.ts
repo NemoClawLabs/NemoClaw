@@ -3159,7 +3159,9 @@ export function createSandboxWithBaseImageResolution(runtime: SandboxCreateOrche
           startupArgv: intendedSandboxStartupCommand,
         },
         inferenceRouteReservation,
-        withLifecycleLock: sandboxMutationLock.withMcpLifecycleLock,
+        withLifecycleLock: sandboxGpuCreateFlow.bindHermesPortableOnboardingLifecycleLock(
+          sandboxMutationLock.withMcpLifecycleLock,
+        ),
         childEnv: sandboxEnv,
         openshellArgv,
         createSandbox: (
