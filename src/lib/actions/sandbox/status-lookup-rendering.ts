@@ -38,8 +38,12 @@ export async function printSandboxGatewayLookupStatus(
       return;
     case "gateway_schema_mismatch":
       console.log(context.lookup.output);
-      deferSandboxLifecycleExit(1);
+      return deferSandboxLifecycleExit(1);
     case "missing":
+      if (context.effectivePreflight.intentionalStopConfirmed) {
+        printConfirmedStoppedSandboxStatus(context.sandboxName);
+        return;
+      }
       printMissingLiveSandboxStatusGuidance(context);
       deferSandboxLifecycleExit(1);
     case "identity_drift":
@@ -57,6 +61,14 @@ export async function printSandboxGatewayLookupStatus(
     default:
       await printUnknownGatewayLookupStatus(context);
   }
+}
+
+function printConfirmedStoppedSandboxStatus(sandboxName: string): void {
+  console.log("");
+  console.log("  Phase: Stopped");
+  console.log(`  Sandbox '${sandboxName}' is stopped.`);
+  console.log("  Workspace state is preserved.");
+  console.log(`  Start it again with \`${CLI_NAME} ${sandboxName} start\`.`);
 }
 
 function printSandboxRecoveryFailedLookupStatus({
@@ -133,7 +145,12 @@ function printPresentSandboxGatewayLookupStatus({
     );
     console.log("");
   }
-  console.log(lookup.output);
+  const isStopped = phase === "Stopped";
+  const renderedOutput =
+    isStopped && lookup.output
+      ? lookup.output.replace(/^(\s*Phase:\s*)\S+\s*$/gmu, "$1Stopped")
+      : lookup.output;
+  if (renderedOutput) console.log(renderedOutput);
   printNonReadySandboxPhaseGuidance({ sandboxName, phase, dockerRuntime });
 }
 
@@ -237,7 +254,10 @@ function printNonReadySandboxPhaseGuidance({
   dockerRuntime: ReturnType<typeof getSandboxDockerRuntime> | null;
 }): void {
   if (!phase || phase === "Ready") return;
-  if (dockerRuntime?.containerName && !dockerRuntime.running && !dockerRuntime.paused) {
+  if (
+    phase === "Stopped" ||
+    (dockerRuntime?.containerName && !dockerRuntime.running && !dockerRuntime.paused)
+  ) {
     console.log("");
     console.log(`  Sandbox '${sandboxName}' is stopped.`);
     console.log("  Workspace state is preserved.");
