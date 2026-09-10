@@ -247,6 +247,23 @@ describe("E2E fixture clients", () => {
     },
   );
 
+  it("rejects a wrapper as the owner of a canonical OpenShell listener", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue({ stdout: "4321\n" });
+    runner.enqueue({ stdout: "/tmp/openshell-wrapper\n" });
+    runner.enqueue({ stdout: "/opt/openshell\n" });
+    runner.enqueue({ stdout: "/tmp/openshell-wrapper\n" });
+    runner.enqueue({
+      stdout:
+        "/tmp/openshell-wrapper --gateway nemoclaw --workspace default forward service alpha --target-port 18789 --target-host 127.0.0.1 --local 127.0.0.1:18789\n",
+    });
+    runner.enqueue({ stdout: "4321\n" });
+
+    await expect(
+      new HostCliClient(runner).inspectOpenShellForwardListener("18789", "alpha"),
+    ).resolves.toMatchObject({ valid: false });
+  });
+
   it("composes installation, OpenShell resolution, and launch in authority order", async () => {
     const runner = new FakeRunner();
     runner.enqueue({ stdout: "installation complete\n" });
@@ -436,7 +453,10 @@ describe("E2E fixture clients", () => {
 
     await host.cleanupSandbox("assistant", options);
     await host.cleanupGatewayRegistration("nemoclaw-18080", options);
-    await host.cleanupForward(18789, options);
+    await host.cleanupForward(18789, options, {
+      gatewayName: "nemoclaw-18080",
+      sandboxName: "assistant",
+    });
 
     expect(runner.calls).toEqual([
       {
@@ -456,7 +476,7 @@ describe("E2E fixture clients", () => {
       },
       {
         command: "/opt/openshell/bin/openshell",
-        args: ["forward", "stop", "18789"],
+        args: ["forward", "stop", "18789", "assistant", "--gateway", "nemoclaw-18080"],
         options,
       },
     ]);
