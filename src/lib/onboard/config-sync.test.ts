@@ -6,7 +6,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { OpenShellSandboxBufferedCommandExecutor } from "../adapters/openshell/sandbox-command";
 
 import {
   buildSandboxConfigSyncScript,
@@ -56,24 +58,214 @@ function modeBits(file: string): number {
 }
 
 describe("sandbox config sync helpers", () => {
+  describe("OpenShell readiness recovery", () => {
+    const notReady = {
+      outcome: { kind: "completed" as const, exitCode: 1 },
+      stdout: "",
+      stderr:
+        "Error: \u001b[31m×\u001b[0m sandbox 'spark-box' is not ready (phase: Error); wait for it to\n  │ reach Ready state\n",
+    };
+    const runBuffered = vi.fn<OpenShellSandboxBufferedCommandExecutor["runBuffered"]>();
+    const inspectSandboxIdentity = vi.fn(() => "original-identity");
+    const syncConfig = createNemoClawConfigSync(
+      {
+        inspectSandboxIdentity,
+        getProviderSelectionConfig: () => ({
+          endpointType: "custom",
+          endpointUrl: "https://inference.local/v1",
+          ncpPartner: null,
+          model: "model",
+          profile: "inference-local",
+          credentialEnv: "OPENAI_API_KEY",
+          provider: "provider",
+          providerLabel: "Provider",
+        }),
+        sandboxCommandExecutor: { runBuffered },
+      },
+      () => "nemoclaw",
+    );
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      runBuffered.mockReset().mockResolvedValue(notReady);
+      inspectSandboxIdentity.mockReset().mockReturnValue("original-identity");
+      vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it.each(["", "."])(
+      "syncs after a transient Error rejection with %j final punctuation",
+      async (punctuation) => {
+        runBuffered
+          .mockResolvedValueOnce({
+            ...notReady,
+            stderr: notReady.stderr.trimEnd() + punctuation + "\n",
+          })
+          .mockResolvedValueOnce({
+            outcome: { kind: "completed", exitCode: 0 },
+            stdout: "",
+            stderr: "",
+          });
+        const revalidate = vi.fn();
+        const pending = expect(
+          syncConfig("spark-box", "provider", "model", revalidate),
+        ).resolves.toBeUndefined();
+
+        await Promise.all([pending, vi.advanceTimersByTimeAsync(2_000)]);
+
+        expect(runBuffered).toHaveBeenCalledTimes(2);
+        expect(revalidate).toHaveBeenCalledTimes(2);
+        expect(inspectSandboxIdentity.mock.calls).toEqual([
+          [{ sandboxName: "spark-box", gatewayName: "nemoclaw", timeoutMs: 60_000 }],
+          [{ sandboxName: "spark-box", gatewayName: "nemoclaw", timeoutMs: 58_000 }],
+        ]);
+        expect(runBuffered.mock.calls[1][0].input).toBe(runBuffered.mock.calls[0][0].input);
+        expect(runBuffered.mock.calls[1][0].timeoutMilliseconds).toBe(58_000);
+        expect(process.stderr.write).toHaveBeenCalledWith(
+          notReady.stderr.trimEnd() + punctuation + "\n",
+        );
+      },
+    );
+
+    it("does not wait when the first config-sync execution succeeds", async () => {
+      runBuffered.mockResolvedValue({
+        outcome: { kind: "completed", exitCode: 0 },
+        stdout: "",
+        stderr: "",
+      });
+      await syncConfig("spark-box", "provider", "model");
+      expect(runBuffered).toHaveBeenCalledTimes(1);
+      expect(inspectSandboxIdentity).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("rejects a replaced sandbox on retry even without the optional callback", async () => {
+      inspectSandboxIdentity
+        .mockReturnValueOnce("original-identity")
+        .mockReturnValue("replacement-identity");
+      const pending = expect(syncConfig("spark-box", "provider", "model")).rejects.toThrow(
+        "identity changed before config-sync retry",
+      );
+      await Promise.all([pending, vi.advanceTimersByTimeAsync(2_000)]);
+      expect(runBuffered).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("does not execute when the initial identity cannot be read", async () => {
+      inspectSandboxIdentity.mockImplementation(() => {
+        throw new Error("identity unavailable");
+      });
+      await expect(syncConfig("spark-box", "provider", "model")).rejects.toThrow(
+        "identity unavailable",
+      );
+      expect(runBuffered).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("does not retry when the identity cannot be read again", async () => {
+      inspectSandboxIdentity.mockReturnValueOnce("original-identity");
+      inspectSandboxIdentity.mockImplementation(() => {
+        throw new Error("identity unavailable");
+      });
+      const pending = expect(syncConfig("spark-box", "provider", "model")).rejects.toThrow(
+        "identity unavailable",
+      );
+      await Promise.all([pending, vi.advanceTimersByTimeAsync(2_000)]);
+      expect(runBuffered).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("does not execute after an identity read consumes the remaining deadline", async () => {
+      inspectSandboxIdentity.mockReturnValueOnce("original-identity").mockImplementation(() => {
+        vi.setSystemTime(Date.now() + 58_000);
+        return "original-identity";
+      });
+      const pending = expect(syncConfig("spark-box", "provider", "model")).rejects.toThrow(
+        "did not return to Ready within 60s",
+      );
+      await Promise.all([pending, vi.advanceTimersByTimeAsync(2_000)]);
+      expect(runBuffered).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("stops after 60 seconds if OpenShell keeps rejecting execution", async () => {
+      const pending = expect(syncConfig("spark-box", "provider", "model")).rejects.toThrow(
+        "did not return to Ready within 60s",
+      );
+      await Promise.all([pending, vi.advanceTimersByTimeAsync(60_000)]);
+      const attempts = runBuffered.mock.calls.length;
+      expect(attempts).toBeGreaterThan(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(runBuffered).toHaveBeenCalledTimes(attempts);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("does not execute again when sandbox identity changes while waiting", async () => {
+      const revalidate = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw new Error("sandbox identity changed");
+        });
+      const pending = expect(
+        syncConfig("spark-box", "provider", "model", revalidate),
+      ).rejects.toThrow("sandbox identity changed");
+      await Promise.all([pending, vi.advanceTimersByTimeAsync(2_000)]);
+      expect(runBuffered).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["another sandbox", { stderr: notReady.stderr.replace("spark-box", "other-box") }],
+      ["another phase", { stderr: notReady.stderr.replace("phase: Error", "phase: Stopped") }],
+      ["a script error", { stderr: "permission denied\n" }],
+      ["possible script execution", { stdout: "script started\n" }],
+      [
+        "a terminated command",
+        { outcome: { kind: "completed" as const, exitCode: 1, signal: "SIGTERM" as const } },
+      ],
+      [
+        "a transport timeout",
+        {
+          outcome: {
+            kind: "failed" as const,
+            error: { kind: "timeout" as const, message: "config sync timed out" },
+          },
+        },
+      ],
+    ])("does not retry %s", async (_label, override) => {
+      runBuffered.mockResolvedValue({ ...notReady, ...override });
+      await expect(syncConfig("spark-box", "provider", "model")).rejects.toThrow();
+      expect(runBuffered).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   it("revalidates sandbox identity immediately before sandbox execution", async () => {
     const runBuffered = vi.fn();
     const revalidateSandboxIdentity = vi.fn(() => {
       throw new Error("sandbox identity changed");
     });
-    const syncConfig = createNemoClawConfigSync({
-      getProviderSelectionConfig: () => ({
-        endpointType: "custom",
-        endpointUrl: "https://inference.local/v1",
-        ncpPartner: null,
-        model: "model",
-        profile: "inference-local",
-        credentialEnv: "OPENAI_API_KEY",
-        provider: "provider",
-        providerLabel: "Provider",
-      }),
-      sandboxCommandExecutor: { runBuffered },
-    });
+    const syncConfig = createNemoClawConfigSync(
+      {
+        inspectSandboxIdentity: () => "original-identity",
+        getProviderSelectionConfig: () => ({
+          endpointType: "custom",
+          endpointUrl: "https://inference.local/v1",
+          ncpPartner: null,
+          model: "model",
+          profile: "inference-local",
+          credentialEnv: "OPENAI_API_KEY",
+          provider: "provider",
+          providerLabel: "Provider",
+        }),
+        sandboxCommandExecutor: { runBuffered },
+      },
+      () => "nemoclaw",
+    );
 
     await expect(
       syncConfig("spark-box", "provider", "model", revalidateSandboxIdentity),
@@ -91,54 +283,64 @@ describe("sandbox config sync helpers", () => {
       stdout: "",
       stderr: "",
     }));
-    const syncConfig = createNemoClawConfigSync({
-      getProviderSelectionConfig: () => ({
-        endpointType: "custom",
-        endpointUrl: "https://inference.local/v1",
-        ncpPartner: null,
-        model: "model",
-        profile: "inference-local",
-        credentialEnv: "OPENAI_API_KEY",
-        provider: "provider",
-        providerLabel: "Provider",
-      }),
-      sandboxCommandExecutor: { runBuffered },
-    });
+    const syncConfig = createNemoClawConfigSync(
+      {
+        inspectSandboxIdentity: () => "original-identity",
+        getProviderSelectionConfig: () => ({
+          endpointType: "custom",
+          endpointUrl: "https://inference.local/v1",
+          ncpPartner: null,
+          model: "model",
+          profile: "inference-local",
+          credentialEnv: "OPENAI_API_KEY",
+          provider: "provider",
+          providerLabel: "Provider",
+        }),
+        sandboxCommandExecutor: { runBuffered },
+      },
+      () => "nemoclaw",
+    );
 
     await syncConfig("spark-box", "provider", "model");
 
     expect(runBuffered).toHaveBeenCalledWith({
       sandboxName: "spark-box",
-      target: { kind: "selected" },
+      target: { kind: "named", gatewayName: "nemoclaw" },
       command: ["/bin/bash", "-s"],
       tty: false,
       input: expect.stringContaining('"provider": "provider"'),
+      timeoutMilliseconds: expect.any(Number),
+      timeoutKillSignal: "SIGKILL",
     });
   });
 
   it("propagates typed sandbox execution failures", async () => {
-    const syncConfig = createNemoClawConfigSync({
-      getProviderSelectionConfig: () => ({
-        endpointType: "custom",
-        endpointUrl: "https://inference.local/v1",
-        ncpPartner: null,
-        model: "model",
-        profile: "inference-local",
-        credentialEnv: "OPENAI_API_KEY",
-        provider: "provider",
-        providerLabel: "Provider",
-      }),
-      sandboxCommandExecutor: {
-        runBuffered: async () => ({
-          outcome: {
-            kind: "failed",
-            error: { kind: "timeout", message: "config sync timed out" },
-          },
-          stdout: "",
-          stderr: "",
+    const syncConfig = createNemoClawConfigSync(
+      {
+        inspectSandboxIdentity: () => "original-identity",
+        getProviderSelectionConfig: () => ({
+          endpointType: "custom",
+          endpointUrl: "https://inference.local/v1",
+          ncpPartner: null,
+          model: "model",
+          profile: "inference-local",
+          credentialEnv: "OPENAI_API_KEY",
+          provider: "provider",
+          providerLabel: "Provider",
         }),
+        sandboxCommandExecutor: {
+          runBuffered: async () => ({
+            outcome: {
+              kind: "failed",
+              error: { kind: "timeout", message: "config sync timed out" },
+            },
+            stdout: "",
+            stderr: "",
+          }),
+        },
       },
-    });
+      () => "nemoclaw",
+    );
 
     await expect(syncConfig("spark-box", "provider", "model")).rejects.toThrow(
       "config sync timed out",
