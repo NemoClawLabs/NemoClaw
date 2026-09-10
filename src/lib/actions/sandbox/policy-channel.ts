@@ -35,6 +35,7 @@ import {
   MessagingWorkflowPlanner,
   MESSAGING_CREDENTIAL_PROVIDER_TYPE,
   runMessagingHook,
+  type MessagingHookRegistry,
   type MessagingOpenShellRunner,
   type SandboxMessagingChannelPlan,
   type SandboxMessagingPlan,
@@ -193,6 +194,7 @@ function withSandboxMutationLockUnlessPreview<T>(
  */
 export interface AddSandboxChannelDependencies {
   readonly googlechatNonInteractiveAudienceCapability?: GooglechatNonInteractiveAudienceCapability;
+  readonly preEnableHookRegistry?: MessagingHookRegistry;
   readonly upsertMessagingProviders?: typeof policyChannelDependencies.upsertMessagingProviders;
 }
 
@@ -748,6 +750,7 @@ async function checkMessagingPreEnableHooks(
   channelName: string,
   plan: SandboxMessagingPlan,
   force: boolean,
+  injectedHookRegistry?: MessagingHookRegistry,
 ): Promise<boolean> {
   const requests = MessagingSetupApplier.listPreEnableChecks(plan);
   if (requests.length === 0) return true;
@@ -769,7 +772,9 @@ async function checkMessagingPreEnableHooks(
     return true;
   }
 
-  const hookRegistry = createBuiltInMessagingHookRegistry();
+  const hookRegistry =
+    injectedHookRegistry ??
+    policyChannelDependencies.createMessagingHostForwardPreEnableHookRegistry();
   const currentGatewayName = getSandboxTargetGatewayName(sandboxName);
   const additionalInputs = createMessagingPreEnableHookInputs({
     currentSandbox: sandboxName,
@@ -982,7 +987,19 @@ export function revalidateMessagingProviderAttachmentTarget(
   sandboxName: string,
   gatewayName: string,
 ): void {
-  const expected = registry.getSandbox(sandboxName);
+  let expected = registry.getSandbox(sandboxName);
+  if (
+    expected &&
+    (expected.lifecycleGeneration === undefined ||
+      expected.lifecycleLiveIdentityFingerprint === undefined)
+  ) {
+    expected =
+      policyChannelDependencies.recoverMessagingProviderAttachmentIdentity(
+        expected,
+        gatewayName,
+        onboardSession,
+      ) ?? expected;
+  }
   const lifecycleGeneration = expected?.lifecycleGeneration;
   const expectedFingerprint = expected?.lifecycleLiveIdentityFingerprint;
   if (
@@ -992,7 +1009,8 @@ export function revalidateMessagingProviderAttachmentTarget(
     (expected.gatewayName && expected.gatewayName !== gatewayName)
   ) {
     throw new Error(
-      `Sandbox '${sandboxName}' has incomplete lifecycle identity for messaging provider attachment.`,
+      `Sandbox '${sandboxName}' has incomplete lifecycle identity for messaging provider attachment. ` +
+        "Missing fields require a matching completed onboarding receipt. Preserve the registry and onboarding state for recovery.",
     );
   }
   const liveFingerprint = policyChannelDependencies.inspectMessagingProviderAttachmentTarget(
@@ -1418,7 +1436,15 @@ async function addSandboxChannelUnlocked(
   }
   // Credential axis passed; now channel-owned pre-enable hooks can catch
   // channel-specific conflicts before provider/policy mutation.
-  if (!(await checkMessagingPreEnableHooks(sandboxName, canonical, plan, force))) {
+  if (
+    !(await checkMessagingPreEnableHooks(
+      sandboxName,
+      canonical,
+      plan,
+      force,
+      dependencies.preEnableHookRegistry,
+    ))
+  ) {
     return; // user aborted; nothing registered or widened
   }
   assertAddChannelPlanActive(sandboxName, manifest, plan);
