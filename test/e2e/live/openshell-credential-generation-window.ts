@@ -3,12 +3,8 @@
 
 import { MCP_BRIDGE_TEST_CREDENTIALS } from "../fixtures/mcp-bridge-credentials.ts";
 
-/** OpenShell f27ff150 retains exactly this many revision resolvers. */
-export const OPENSHELL_RETAINED_CREDENTIAL_GENERATIONS = 8;
-
-/** One more update than the retained window guarantees eviction of revision zero. */
-export const CREDENTIAL_WINDOW_ROTATION_COUNT = OPENSHELL_RETAINED_CREDENTIAL_GENERATIONS + 1;
-export const CREDENTIAL_WINDOW_EXPIRY_DELAY_MS = 3 * 60_000;
+/** Exercise repeated secret refreshes without changing the authorization epoch. */
+export const CREDENTIAL_WINDOW_REFRESH_COUNT = 9;
 
 export const CREDENTIAL_WINDOW_ENV_NAME = "FAKE_MCP_SECRET";
 export const CREDENTIAL_WINDOW_REQUEST_PREFIX = "nemoclaw-credential-window";
@@ -19,20 +15,22 @@ export const CREDENTIAL_WINDOW_PATHS = {
 } as const;
 
 export const CREDENTIAL_WINDOW_STEPS = {
-  allowedBeforeExpiry: "allowed-before-expiry",
-  deniedAfterExpiry: "denied-after-expiry",
-  fallbackAfterEviction: "fallback-after-eviction",
+  allowedAfterRefresh: "allowed-after-refresh",
+  allowedAfterRotations: "allowed-after-rotations",
   deniedAfterKeyRemoval: "denied-after-key-removal",
+  deniedAfterKeyRestore: "denied-after-key-restore",
+  allowedBeforeDetach: "allowed-before-detach",
   deniedAfterDetach: "denied-after-detach",
   deniedAfterReadd: "denied-after-readd",
   stop: "stop",
 } as const;
 
 export type CredentialWindowRequestStep =
-  | (typeof CREDENTIAL_WINDOW_STEPS)["allowedBeforeExpiry"]
-  | (typeof CREDENTIAL_WINDOW_STEPS)["deniedAfterExpiry"]
-  | (typeof CREDENTIAL_WINDOW_STEPS)["fallbackAfterEviction"]
+  | (typeof CREDENTIAL_WINDOW_STEPS)["allowedAfterRefresh"]
+  | (typeof CREDENTIAL_WINDOW_STEPS)["allowedAfterRotations"]
   | (typeof CREDENTIAL_WINDOW_STEPS)["deniedAfterKeyRemoval"]
+  | (typeof CREDENTIAL_WINDOW_STEPS)["deniedAfterKeyRestore"]
+  | (typeof CREDENTIAL_WINDOW_STEPS)["allowedBeforeDetach"]
   | (typeof CREDENTIAL_WINDOW_STEPS)["deniedAfterDetach"]
   | (typeof CREDENTIAL_WINDOW_STEPS)["deniedAfterReadd"];
 
@@ -41,7 +39,7 @@ export function credentialWindowSecret(generation: number): string {
 }
 
 export function credentialWindowSecrets(): string[] {
-  return Array.from({ length: CREDENTIAL_WINDOW_ROTATION_COUNT + 3 }, (_, generation) =>
+  return Array.from({ length: CREDENTIAL_WINDOW_REFRESH_COUNT + 3 }, (_, generation) =>
     credentialWindowSecret(generation),
   );
 }
@@ -50,9 +48,15 @@ export function credentialWindowRequestId(step: CredentialWindowRequestStep): st
   return `${CREDENTIAL_WINDOW_REQUEST_PREFIX}:${step}`;
 }
 
+export function credentialWindowStableHandlePattern(envName = CREDENTIAL_WINDOW_ENV_NAME): RegExp {
+  if (!/^[A-Z_][A-Z0-9_]{0,127}$/u.test(envName)) {
+    throw new Error("credential window environment name is invalid");
+  }
+  return new RegExp(`^openshell:resolve:env:(s[a-f0-9]{64})_${envName}$`, "u");
+}
+
 export function buildCredentialWindowProviderUpdateArgs(
   providerName: string,
-  expiresAtMs: number,
   removeCredential = false,
 ): string[] {
   return [
@@ -61,32 +65,36 @@ export function buildCredentialWindowProviderUpdateArgs(
     providerName,
     "--credential",
     removeCredential ? `${CREDENTIAL_WINDOW_ENV_NAME}=` : CREDENTIAL_WINDOW_ENV_NAME,
-    "--credential-expires-at",
-    `${CREDENTIAL_WINDOW_ENV_NAME}=${expiresAtMs}`,
   ];
 }
 
 export interface CredentialWindowChildOptions {
   readonly mcpUrl: string;
   readonly maxRuntimeMs?: number;
+  readonly paths?: {
+    readonly control: string;
+    readonly ready: string;
+    readonly acknowledgement: string;
+  };
 }
 
 /**
  * Build the process held open across provider mutations. It snapshots the
- * revisioned child environment exactly once, accepts only six bounded request
- * steps plus stop, and reports only revision/status metadata. The credential
- * placeholder is used solely as the Authorization header so the OpenShell proxy
- * must resolve it on each request.
+ * stable credential handle exactly once, accepts only seven bounded request steps
+ * plus stop, and reports only handle/status metadata. The credential placeholder
+ * is used solely as the Authorization header so the OpenShell proxy must resolve
+ * it on each request.
  */
 export function buildCredentialWindowChildScript(options: CredentialWindowChildOptions): string {
   const config = JSON.stringify({
-    acknowledgementPath: CREDENTIAL_WINDOW_PATHS.acknowledgement,
-    controlPath: CREDENTIAL_WINDOW_PATHS.control,
+    acknowledgementPath: (options.paths ?? CREDENTIAL_WINDOW_PATHS).acknowledgement,
+    controlPath: (options.paths ?? CREDENTIAL_WINDOW_PATHS).control,
     envName: CREDENTIAL_WINDOW_ENV_NAME,
     maxRuntimeMs: options.maxRuntimeMs ?? 40 * 60_000,
     mcpUrl: options.mcpUrl,
-    readyPath: CREDENTIAL_WINDOW_PATHS.ready,
+    readyPath: (options.paths ?? CREDENTIAL_WINDOW_PATHS).ready,
     requestPrefix: CREDENTIAL_WINDOW_REQUEST_PREFIX,
+    stableHandlePatternSource: credentialWindowStableHandlePattern().source,
     steps: CREDENTIAL_WINDOW_STEPS,
   });
 
@@ -95,18 +103,17 @@ const fs = require("node:fs");
 const https = require("node:https");
 const config = ${config};
 const credentialPlaceholder = process.env[config.envName] || "";
-const revisionPattern = new RegExp(
-  "^openshell:resolve:env:(v[0-9]{1,20})_" + config.envName + "$",
-);
-const revisionMatch = revisionPattern.exec(credentialPlaceholder);
-if (!revisionMatch) throw new Error("old child did not receive a revision-scoped credential");
-const revision = revisionMatch[1];
+const stableHandlePattern = new RegExp(config.stableHandlePatternSource);
+const stableHandleMatch = stableHandlePattern.exec(credentialPlaceholder);
+if (!stableHandleMatch) throw new Error("old child did not receive a stable credential handle");
+const stableHandle = stableHandleMatch[1];
 const target = new URL(config.mcpUrl);
 const requestSteps = new Set([
-  config.steps.allowedBeforeExpiry,
-  config.steps.deniedAfterExpiry,
-  config.steps.fallbackAfterEviction,
+  config.steps.allowedAfterRefresh,
+  config.steps.allowedAfterRotations,
   config.steps.deniedAfterKeyRemoval,
+  config.steps.deniedAfterKeyRestore,
+  config.steps.allowedBeforeDetach,
   config.steps.deniedAfterDetach,
   config.steps.deniedAfterReadd,
 ]);
@@ -141,7 +148,7 @@ const request = (step) => new Promise((resolve) => {
   outbound.end(body);
 });
 
-writePrivateJson(config.readyPath, { revision });
+writePrivateJson(config.readyPath, { stableHandle });
 const deadline = Date.now() + config.maxRuntimeMs;
 (async () => {
   let stopped = false;
@@ -160,7 +167,7 @@ const deadline = Date.now() + config.maxRuntimeMs;
     if (!stopped) await delay(200);
   }
   if (!stopped) throw new Error("credential generation window child exceeded its deadline");
-  process.stdout.write(JSON.stringify({ revision, outcomes }) + "\\n");
+  process.stdout.write(JSON.stringify({ stableHandle, outcomes }) + "\\n");
 })().catch((error) => {
   process.stderr.write(String(error && error.message ? error.message : error) + "\\n");
   process.exitCode = 1;
@@ -171,16 +178,15 @@ const deadline = Date.now() + config.maxRuntimeMs;
 export function buildCredentialWindowOneShotScript(): string {
   const config = JSON.stringify({
     envName: CREDENTIAL_WINDOW_ENV_NAME,
+    stableHandlePatternSource: credentialWindowStableHandlePattern().source,
   });
   return `
 const https = require("node:https");
 const config = ${config};
 const credentialPlaceholder = process.env[config.envName] || "";
-const revisionPattern = new RegExp(
-  "^openshell:resolve:env:(v[0-9]{1,20})_" + config.envName + "$",
-);
-const revisionMatch = revisionPattern.exec(credentialPlaceholder);
-if (!revisionMatch) throw new Error("fresh child did not receive a revision-scoped credential");
+const stableHandlePattern = new RegExp(config.stableHandlePatternSource);
+const stableHandleMatch = stableHandlePattern.exec(credentialPlaceholder);
+if (!stableHandleMatch) throw new Error("fresh child did not receive a stable credential handle");
 const target = new URL(process.argv[1]);
 const body = JSON.stringify({ jsonrpc: "2.0", id: process.argv[2], method: "tools/list" });
 const request = https.request({
@@ -196,7 +202,7 @@ const request = https.request({
 }, (response) => {
   response.resume();
   response.on("end", () => {
-    process.stdout.write(JSON.stringify({ revision: revisionMatch[1], status: response.statusCode }) + "\\n");
+    process.stdout.write(JSON.stringify({ stableHandle: stableHandleMatch[1], status: response.statusCode }) + "\\n");
     process.exitCode = response.statusCode === 200 ? 0 : 1;
   });
 });

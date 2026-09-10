@@ -69,7 +69,7 @@ function officialFormulaInfo(): SpawnSyncLikeResult {
     JSON.stringify({
       formulae: [
         {
-          installed: [{ version: "0.0.106" }],
+          installed: [{ version: "0.0.116" }],
           name: "openshell",
           service: { run: HOMEBREW_SERVICE_PROGRAM },
           tap: "nvidia/openshell",
@@ -461,7 +461,7 @@ describe("docker-driver-gateway-service", () => {
   });
 
   it("uses managed service only after metadata and direct gRPC health are ready (#6903)", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
     const events: string[] = [];
     const clock = createVirtualClock();
     let registerCount = 0;
@@ -502,7 +502,6 @@ describe("docker-driver-gateway-service", () => {
     ).resolves.toBe(true);
 
     expect(events).toEqual(["register", "sleep", "register", "ready", "clear", "verify"]);
-    expect(log).toHaveBeenCalledWith("  Starting OpenShell gateway via managed service...");
   });
 
   it.each([

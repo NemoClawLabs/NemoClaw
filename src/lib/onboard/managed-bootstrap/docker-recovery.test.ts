@@ -331,6 +331,152 @@ describe("Docker managed bootstrap restart recovery", () => {
     });
   });
 
+  it("recovers a completed bootstrap through shared commit and OpenShell handoff", async () => {
+    const fake = fixture({ sharedState: "pending" });
+    const transaction = await prepareTransaction(fake);
+    const replacement = await transaction.adapter.activateBootstrapReplacement({
+      handle: transaction.handle,
+      snapshot: transaction.snapshot,
+      prepared: transaction.prepared,
+      durablePreparation: transaction.durable,
+    });
+    await transaction.adapter.awaitBootstrap({
+      handle: transaction.handle,
+      snapshot: transaction.snapshot,
+      replacement,
+      timeoutSecs: 1,
+    });
+    expect(fake.journal?.phase).toBe("bootstrap-complete");
+
+    const restarted = createDockerManagedBootstrapAdapter(fake.deps);
+    await expect(restarted.recoverUnfinishedTransactions()).resolves.toMatchObject({
+      receipts: [{ sourcePhase: "bootstrap-complete", outcome: "committed" }],
+      failures: [],
+    });
+    expectEventBefore(fake.events, "journal:bootstrap-complete", "shared:commit");
+    expectEventBefore(fake.events, "journal:shared-state-committed", `rm:${OLD_ID}`);
+    expect(fake.journal).toBeNull();
+    expect(fake.sharedState).toBe("none");
+    expect(fake.replacement?.State?.Running).toBe(true);
+    expect(vi.mocked(fake.deps.runOpenshell!)).toHaveBeenCalledWith(
+      ["sandbox", "start", "alpha"],
+      expect.any(Object),
+    );
+  });
+
+  it("retains committed recovery state when the OpenShell start handoff fails", async () => {
+    const fake = fixture({ sharedState: "pending" });
+    const transaction = await prepareTransaction(fake);
+    const replacement = await transaction.adapter.activateBootstrapReplacement({
+      handle: transaction.handle,
+      snapshot: transaction.snapshot,
+      prepared: transaction.prepared,
+      durablePreparation: transaction.durable,
+    });
+    await transaction.adapter.awaitBootstrap({
+      handle: transaction.handle,
+      snapshot: transaction.snapshot,
+      replacement,
+      timeoutSecs: 1,
+    });
+    fake.deps.runOpenshell = vi.fn((args) =>
+      args[1] === "start"
+        ? { status: 1, stderr: "injected OpenShell start failure" }
+        : { status: 0 },
+    );
+
+    const restarted = createDockerManagedBootstrapAdapter(fake.deps);
+    await expect(restarted.recoverUnfinishedTransactions()).resolves.toMatchObject({
+      receipts: [],
+      failures: [
+        {
+          sourcePhase: "shared-state-committed",
+          code: "provider-recovery-failed",
+          retryable: true,
+        },
+      ],
+    });
+    expect(fake.journal?.phase).toBe("shared-state-committed");
+    expect(fake.finalization).toBeNull();
+    expect(fake.sharedState).toBe("committed");
+  });
+
+  it("retains committed recovery state when the supervisor does not reconnect", async () => {
+    const fake = fixture({ sharedState: "pending" });
+    const transaction = await prepareTransaction(fake);
+    const replacement = await transaction.adapter.activateBootstrapReplacement({
+      handle: transaction.handle,
+      snapshot: transaction.snapshot,
+      prepared: transaction.prepared,
+      durablePreparation: transaction.durable,
+    });
+    await transaction.adapter.awaitBootstrap({
+      handle: transaction.handle,
+      snapshot: transaction.snapshot,
+      replacement,
+      timeoutSecs: 1,
+    });
+    fake.deps.runOpenshell = vi.fn((args) => ({
+      status: args[1] === "start" ? 0 : 1,
+      stderr: args[1] === "start" ? "" : "injected reconnect failure",
+    }));
+    fake.deps.runCaptureOpenshell = vi.fn(() => "alpha  2026-09-09 10:00:00  Error\n");
+    fake.deps.errorPhaseDebouncePolls = 1;
+
+    const restarted = createDockerManagedBootstrapAdapter(fake.deps);
+    await expect(restarted.recoverUnfinishedTransactions()).resolves.toMatchObject({
+      receipts: [],
+      failures: [
+        {
+          sourcePhase: "shared-state-committed",
+          code: "durable-cleanup-pending",
+          retryable: true,
+        },
+      ],
+    });
+    expect(fake.journal?.phase).toBe("shared-state-committed");
+    expect(fake.finalization).toBeNull();
+    expect(fake.sharedState).toBe("committed");
+  });
+
+  it("restores the original when recovered shared-state commit is rejected", async () => {
+    const fake = fixture({
+      sharedState: "pending",
+      sharedStateCommitResult: { status: 1, stderr: "injected commit rejection" },
+    });
+    const transaction = await prepareTransaction(fake);
+    const replacement = await transaction.adapter.activateBootstrapReplacement({
+      handle: transaction.handle,
+      snapshot: transaction.snapshot,
+      prepared: transaction.prepared,
+      durablePreparation: transaction.durable,
+    });
+    await transaction.adapter.awaitBootstrap({
+      handle: transaction.handle,
+      snapshot: transaction.snapshot,
+      replacement,
+      timeoutSecs: 1,
+    });
+
+    const restarted = createDockerManagedBootstrapAdapter(fake.deps);
+    await expect(restarted.recoverUnfinishedTransactions()).resolves.toMatchObject({
+      receipts: [],
+      failures: [{ sourcePhase: "owner-cleanup-required", code: "provider-recovery-failed" }],
+    });
+    expectEventBefore(fake.events, "journal:bootstrap-complete", "journal:rollback-authorized");
+    expect(fake.original?.State?.Running).toBe(false);
+    expect(fake.replacement).toBeNull();
+    expect(fake.sharedState).toBe("none");
+    expect(fake.journal?.phase).toBe("owner-cleanup-required");
+
+    fake.removeOriginalExternally();
+    await expect(restarted.recoverUnfinishedTransactions()).resolves.toMatchObject({
+      receipts: [{ sourcePhase: "owner-cleanup-required", outcome: "rolled-back" }],
+      failures: [],
+    });
+    expect(fake.journal).toBeNull();
+  });
+
   it("retains durable commit authority when image receipt retirement fails", async () => {
     const fake = fixture({
       agent: "langchain-deepagents-code",

@@ -7,20 +7,26 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildMcpProviderRewriteAuthorization,
-  buildRevisionScopedMcpAuthorizationPattern,
+  buildMcpCredentialHandleAuthorizationPattern,
   MCP_PROVIDER_REWRITE_PROBE_SOURCE,
 } from "../live/mcp-provider-rewrite-probe.ts";
 
 describe("managed MCP provider rewrite probe", () => {
+  const stableCredentialId = "a".repeat(64);
+
   it.each([
     "openshell:resolve:env:v0_FAKE_MCP_SECRET",
     "openshell:resolve:env:v1_FAKE_MCP_SECRET",
     "openshell:resolve:env:v14429878272859325890_FAKE_MCP_SECRET",
-  ])("uses only an exact OpenShell placeholder value [case %#]", (runtimeValue) => {
-    expect(buildMcpProviderRewriteAuthorization("FAKE_MCP_SECRET", runtimeValue)).toBe(
-      `Bearer ${runtimeValue}`,
-    );
-  });
+    `openshell:resolve:env:s${stableCredentialId}_FAKE_MCP_SECRET`,
+  ])(
+    "uses only an exact generation-scoped OpenShell placeholder value [case %#]",
+    (runtimeValue) => {
+      expect(buildMcpProviderRewriteAuthorization("FAKE_MCP_SECRET", runtimeValue)).toBe(
+        `Bearer ${runtimeValue}`,
+      );
+    },
+  );
 
   it.each([
     undefined,
@@ -28,9 +34,12 @@ describe("managed MCP provider rewrite probe", () => {
     "openshell:resolve:env:FAKE_MCP_SECRET",
     "openshell:resolve:env:v_FAKE_MCP_SECRET",
     "openshell:resolve:env:v144298782728593258901_FAKE_MCP_SECRET",
-    "openshell:resolve:env:v1_OTHER_MCP_SECRET",
+    `openshell:resolve:env:s${"a".repeat(63)}_FAKE_MCP_SECRET`,
+    `openshell:resolve:env:s${"a".repeat(65)}_FAKE_MCP_SECRET`,
+    `openshell:resolve:env:s${"A".repeat(64)}_FAKE_MCP_SECRET`,
+    `openshell:resolve:env:s${stableCredentialId}_OTHER_MCP_SECRET`,
     "openshell:resolve:env:vbad_FAKE_MCP_SECRET",
-    "openshell:resolve:env:v1_FAKE_MCP_SECRET\nAuthorization: Bearer raw-secret",
+    `openshell:resolve:env:s${stableCredentialId}_FAKE_MCP_SECRET\nAuthorization: Bearer raw-secret`,
   ])("rejects an absent or unsafe runtime value [case %#]", (runtimeValue) => {
     expect(buildMcpProviderRewriteAuthorization("FAKE_MCP_SECRET", runtimeValue)).toBeNull();
   });
@@ -47,9 +56,10 @@ describe("managed MCP provider rewrite probe", () => {
     "Bearer openshell:resolve:env:v0_FAKE_MCP_SECRET",
     "Bearer openshell:resolve:env:v1_FAKE_MCP_SECRET",
     "Bearer openshell:resolve:env:v14429878272859325890_FAKE_MCP_SECRET",
-  ])("accepts only bounded revision-scoped Deep Agents authorization [case %#]", (value) => {
+    `Bearer openshell:resolve:env:s${stableCredentialId}_FAKE_MCP_SECRET`,
+  ])("accepts only generation-scoped Deep Agents authorization [case %#]", (value) => {
     expect(value).toMatch(
-      new RegExp(buildRevisionScopedMcpAuthorizationPattern("FAKE_MCP_SECRET"), "u"),
+      new RegExp(buildMcpCredentialHandleAuthorizationPattern("FAKE_MCP_SECRET"), "u"),
     );
   });
 
@@ -57,12 +67,15 @@ describe("managed MCP provider rewrite probe", () => {
     "Bearer openshell:resolve:env:FAKE_MCP_SECRET",
     "raw-secret",
     "Bearer openshell:resolve:env:v_FAKE_MCP_SECRET",
-    "Bearer openshell:resolve:env:v1_OTHER_MCP_SECRET",
+    `Bearer openshell:resolve:env:s${stableCredentialId}_OTHER_MCP_SECRET`,
+    `Bearer openshell:resolve:env:s${"a".repeat(63)}_FAKE_MCP_SECRET`,
+    `Bearer openshell:resolve:env:s${"a".repeat(65)}_FAKE_MCP_SECRET`,
+    `Bearer openshell:resolve:env:s${"A".repeat(64)}_FAKE_MCP_SECRET`,
     "Bearer openshell:resolve:env:vbad_FAKE_MCP_SECRET",
     "Bearer openshell:resolve:env:v144298782728593258901_FAKE_MCP_SECRET",
   ])("rejects unsafe Deep Agents authorization [case %#]", (value) => {
     expect(value).not.toMatch(
-      new RegExp(buildRevisionScopedMcpAuthorizationPattern("FAKE_MCP_SECRET"), "u"),
+      new RegExp(buildMcpCredentialHandleAuthorizationPattern("FAKE_MCP_SECRET"), "u"),
     );
   });
 });
